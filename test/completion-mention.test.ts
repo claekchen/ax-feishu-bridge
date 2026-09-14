@@ -16,6 +16,7 @@ test("sends a completion mention to the requester", async () => {
 
   assert.equal(request.path.message_id, "om_question");
   assert.equal(request.data.msg_type, "post");
+  assert.equal(request.data.reply_in_thread, true);
   const post = JSON.parse(request.data.content);
   assert.deepEqual(post.zh_cn.content, [[
     { tag: "at", user_id: "ou_requester" },

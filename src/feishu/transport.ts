@@ -489,6 +489,7 @@ export class FeishuTransport {
       path: { message_id: messageId },
       data: {
         msg_type: "post",
+        reply_in_thread: true,
         content: JSON.stringify({
           [primaryLocale]: content(primaryLocale === "en_us" ? " Reply complete" : " 回复完成"),
           [fallbackLocale]: content(fallbackLocale === "en_us" ? " Reply complete" : " 回复完成"),
