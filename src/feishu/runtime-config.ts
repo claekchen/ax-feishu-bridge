@@ -10,6 +10,7 @@ export const RUNTIME_CONFIG_KEYS = [
   "groupAlsoOnReply",
   "ignoreBotMessages",
   "reactEmoji",
+  "mentionRequesterOnComplete",
   "language",
   "streamingReply",
   "streamPrintFrequencyMs",
@@ -26,6 +27,7 @@ export type RuntimeConfigView = {
   groupAlsoOnReply?: boolean;
   ignoreBotMessages?: boolean;
   reactEmoji?: string;
+  mentionRequesterOnComplete?: boolean;
   language?: "zh" | "en";
   streamingReply?: boolean;
   streamPrintFrequencyMs?: number;
@@ -80,6 +82,7 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
     }
     case "groupAlsoOnReply":
     case "ignoreBotMessages":
+    case "mentionRequesterOnComplete":
     case "streamingReply": {
       const b = parseBoolStrict(text);
       if (b === undefined) return { ok: false, error: `${key} 请使用 true/false/1/0` };

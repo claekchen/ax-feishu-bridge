@@ -312,6 +312,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `FEISHU_IGNORE_BOT_MESSAGES` | 是否忽略其他机器人消息，默认 `true` |
 | `FEISHU_LANGUAGE`     | `zh` 或 `en`                   |
 | `FEISHU_REACT_EMOJI`  | 收到消息时的表情回应，默认 `Get`      |
+| `FEISHU_MENTION_REQUESTER_ON_COMPLETE` | 群聊回复完成后单独 @ 提问者，默认 `false` |
 | `FEISHU_AUTO_START`   | `1` 或 `0`                     |
 | `FEISHU_CARD_ACTION_MODE` | `webhook` 或 `ws`，默认 `webhook` |
 | `FEISHU_CARD_ACTION_WEBHOOK_HOST` | 卡片回调监听地址，默认 `0.0.0.0` |
@@ -337,6 +338,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | --------------------- | ----------------------------- |
 | `promptNotifySec`     | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `promptTimeoutSec`    | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
+| `mentionRequesterOnComplete` | 群聊回复完成后单独 @ 提问者，默认 `false` |
 
 > 注意：长时间任务（例如跑测试、构建、批量处理）默认**不会**再被报为“任务失败”——到达 `promptNotifySec` 后只会在飞书里提示“任务仍在处理中”，回复卡片保持“回复中”，完成后正常送达结果。只有显式设置 `promptTimeoutSec` 后才会硬超时。修改后请执行 `/feishu restart` 生效。
 
@@ -348,6 +350,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 /config
 /config groupKeywords 报警,告警
 /config groupAlsoOnReply true
+/config mentionRequesterOnComplete true
 /config streamingReply false
 /config clear groupKeywords
 /config clear all

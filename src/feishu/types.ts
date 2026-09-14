@@ -25,6 +25,8 @@ export type FeishuConfig = {
   cardActionWebhookPath?: string;
   language?: "zh" | "en";
   reactEmoji?: string;
+  /** Mention the requester in a separate group message after a successful reply. */
+  mentionRequesterOnComplete?: boolean;
   autoStart?: boolean;
   /** Long-task notice threshold in seconds (0 disables). */
   promptNotifySec?: number;

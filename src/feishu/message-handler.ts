@@ -151,6 +151,16 @@ export class FeishuMessageHandler {
         imageInputs,
         async (reply) => {
           await card.completeWithAnswer(reply || "（无内容）");
+          if (cfg?.mentionRequesterOnComplete && msg.chatType === "group" && msg.senderOpenId !== "unknown") {
+            try {
+              await transport.replyCompletionMention(msg.messageId, msg.senderOpenId);
+            } catch (error) {
+              debugLog("feishu.reply.completion_mention_error", {
+                messageId: msg.messageId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
         },
         card,
         useStreaming ? (delta) => card.append(delta) : undefined,
