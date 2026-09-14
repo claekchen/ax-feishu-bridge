@@ -559,7 +559,11 @@ export class FeishuTransport {
     const extracted = extractTextFromMsgType(parent.msgType, parent.content, botOpenId);
     let text = extracted.text.trim();
     if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n…(truncated)`;
-    return { msgType: parent.msgType, text, attachments: extracted.attachments };
+    const attachments = extracted.attachments.map((attachment) => ({
+      ...attachment,
+      sourceMessageId: parent.messageId,
+    }));
+    return { msgType: parent.msgType, text, attachments };
   }
 
   async downloadMessageResource(messageId: string, fileKey: string, type: "image" | "file"): Promise<{ bytes: Buffer; mimeType?: string }> {
