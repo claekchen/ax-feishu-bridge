@@ -100,6 +100,7 @@ export const DEFAULT_CONFIG: Pick<
   | "groupPolicy"
   | "groupKeywords"
   | "groupAlsoOnReply"
+  | "groupRecentMessageLimit"
   | "ignoreBotMessages"
   | "cardActionMode"
   | "cardActionWebhookHost"
@@ -128,6 +129,7 @@ export const DEFAULT_CONFIG: Pick<
   groupPolicy: "open",
   groupKeywords: [],
   groupAlsoOnReply: false,
+  groupRecentMessageLimit: 0,
   ignoreBotMessages: true,
   cardActionMode: "webhook",
   cardActionWebhookHost: "0.0.0.0",
@@ -247,6 +249,7 @@ function applyRuntimeDefaults(cfg: FeishuConfig): FeishuConfig {
       ? parseGroupKeywords(cfg.groupKeywords)
       : (cfg.groupKeywords ?? DEFAULT_CONFIG.groupKeywords),
     groupAlsoOnReply: cfg.groupAlsoOnReply ?? DEFAULT_CONFIG.groupAlsoOnReply,
+    groupRecentMessageLimit: Math.min(50, numberOr(cfg.groupRecentMessageLimit, DEFAULT_CONFIG.groupRecentMessageLimit!)),
     ignoreBotMessages: cfg.ignoreBotMessages ?? DEFAULT_CONFIG.ignoreBotMessages,
     mentionRequesterOnComplete: cfg.mentionRequesterOnComplete ?? DEFAULT_CONFIG.mentionRequesterOnComplete,
     parseInteractiveCards: cfg.parseInteractiveCards ?? DEFAULT_CONFIG.parseInteractiveCards,
@@ -287,6 +290,7 @@ export function loadBaseConfig(): FeishuConfig | undefined {
       groupPolicy: (env("GROUP_POLICY") as GroupPolicy) || DEFAULT_CONFIG.groupPolicy,
       groupKeywords: parseGroupKeywords(env("GROUP_KEYWORDS")),
       groupAlsoOnReply: parseBool(env("GROUP_ALSO_ON_REPLY"), DEFAULT_CONFIG.groupAlsoOnReply!),
+      groupRecentMessageLimit: parseEnvSeconds(env("GROUP_RECENT_MESSAGE_LIMIT")) ?? DEFAULT_CONFIG.groupRecentMessageLimit!,
       ignoreBotMessages: parseBool(env("IGNORE_BOT_MESSAGES"), DEFAULT_CONFIG.ignoreBotMessages!),
       cardActionMode: parseCardActionMode(env("CARD_ACTION_MODE")) || DEFAULT_CONFIG.cardActionMode,
       cardActionWebhookHost: env("CARD_ACTION_WEBHOOK_HOST")?.trim() || DEFAULT_CONFIG.cardActionWebhookHost,
@@ -322,6 +326,7 @@ export function loadBaseConfig(): FeishuConfig | undefined {
     groupPolicy: cfg.groupPolicy || DEFAULT_CONFIG.groupPolicy,
     groupKeywords: parseGroupKeywords(cfg.groupKeywords),
     groupAlsoOnReply: parseBool(cfg.groupAlsoOnReply, DEFAULT_CONFIG.groupAlsoOnReply!),
+    groupRecentMessageLimit: cfg.groupRecentMessageLimit,
     ignoreBotMessages: parseBool(cfg.ignoreBotMessages, DEFAULT_CONFIG.ignoreBotMessages!),
     cardActionMode: parseCardActionMode(cfg.cardActionMode) || DEFAULT_CONFIG.cardActionMode,
     cardActionWebhookHost: cfg.cardActionWebhookHost || DEFAULT_CONFIG.cardActionWebhookHost,

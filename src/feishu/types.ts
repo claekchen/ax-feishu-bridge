@@ -17,6 +17,8 @@ export type FeishuConfig = {
    * 默认 false。
    */
   groupAlsoOnReply?: boolean;
+  /** Maximum intervening group messages added to a triggered prompt; 0 disables. */
+  groupRecentMessageLimit?: number;
   /** 是否忽略 sender_type=bot 的消息；默认 true */
   ignoreBotMessages?: boolean;
   cardActionMode?: CardActionMode;

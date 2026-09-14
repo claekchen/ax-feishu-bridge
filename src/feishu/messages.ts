@@ -150,6 +150,20 @@ export function getCommandList(): string {
 }
 
 /** 合并用户文本与引用父消息，供 agent 调查告警卡片等场景 */
+export function buildPromptWithRecentMessages(
+  currentPrompt: string,
+  messages: Array<{ sender: string; text: string }>,
+): string {
+  if (!messages.length) return currentPrompt;
+  return [
+    "[Group messages since last interaction]",
+    ...messages.map((message) => `[${message.sender}] ${message.text}`),
+    "---",
+    "[Current message]",
+    currentPrompt,
+  ].join("\n");
+}
+
 export function buildPromptWithQuote(userText: string, quoted?: { msgType: string; text: string } | null): string {
   if (!quoted?.text?.trim()) return userText;
   const blocks = [

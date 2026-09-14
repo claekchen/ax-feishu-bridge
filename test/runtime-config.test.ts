@@ -21,6 +21,7 @@ function baseCfg(partial: Record<string, unknown> = {}) {
     groupPolicy: "mention" as const,
     groupKeywords: [] as string[],
     groupAlsoOnReply: false,
+    groupRecentMessageLimit: 0,
     language: "zh" as const,
     reactEmoji: "Get",
     mentionRequesterOnComplete: false,
@@ -38,6 +39,7 @@ test("isRuntimeConfigKey only allows whitelist", () => {
   assert.equal(isRuntimeConfigKey("streamingReply"), true);
   assert.equal(isRuntimeConfigKey("ignoreBotMessages"), true);
   assert.equal(isRuntimeConfigKey("mentionRequesterOnComplete"), true);
+  assert.equal(isRuntimeConfigKey("groupRecentMessageLimit"), true);
   assert.equal(isRuntimeConfigKey("appId"), false);
   assert.equal(isRuntimeConfigKey("appSecret"), false);
   assert.equal(isRuntimeConfigKey("cardActionMode"), false);
@@ -57,6 +59,9 @@ test("parseRuntimeConfigValue for keywords / bool / enum / number", () => {
   assert.deepEqual(parseRuntimeConfigValue("groupPolicy", "open"), { ok: true, value: "open" });
   assert.equal(parseRuntimeConfigValue("groupPolicy", "admin").ok, false);
   assert.deepEqual(parseRuntimeConfigValue("language", "en"), { ok: true, value: "en" });
+  assert.deepEqual(parseRuntimeConfigValue("groupRecentMessageLimit", "20"), { ok: true, value: 20 });
+  assert.deepEqual(parseRuntimeConfigValue("groupRecentMessageLimit", "0"), { ok: true, value: 0 });
+  assert.equal(parseRuntimeConfigValue("groupRecentMessageLimit", "51").ok, false);
   assert.deepEqual(parseRuntimeConfigValue("streamPrintStep", "3"), { ok: true, value: 3 });
   assert.equal(parseRuntimeConfigValue("streamPrintStep", "0").ok, false);
   assert.equal(parseRuntimeConfigValue("appId", "x").ok, false);
