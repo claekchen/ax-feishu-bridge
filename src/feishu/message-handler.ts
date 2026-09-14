@@ -14,7 +14,7 @@ import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandLis
 import { ReplyCard } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
-import type { FeishuMessage } from "./types.ts";
+import type { FeishuAttachment, FeishuMessage } from "./types.ts";
 
 const CONTENT_DEDUPE_TTL_MS = 5_000;
 
@@ -328,7 +328,7 @@ export class FeishuMessageHandler {
 
   private async processAttachments(
     msg: FeishuMessage,
-    attachments: Array<{ kind: "image" | "file"; fileKey: string; fileName?: string }>,
+    attachments: FeishuAttachment[],
     modelSupportsImage: boolean,
   ) {
     const transport = this.getTransport();
@@ -349,7 +349,7 @@ export class FeishuMessageHandler {
         }
         try {
           const resource = await withTimeout(
-            transport.downloadImage(msg.messageId, attachment.fileKey),
+            transport.downloadImage(attachment.sourceMessageId || msg.messageId, attachment.fileKey),
             15000,
             "图片下载超时",
           );
@@ -385,7 +385,7 @@ export class FeishuMessageHandler {
       }
       try {
         const resource = await withTimeout(
-          transport.downloadMessageResource(msg.messageId, attachment.fileKey, "file"),
+          transport.downloadMessageResource(attachment.sourceMessageId || msg.messageId, attachment.fileKey, "file"),
           15000,
           `文件下载超时：${fileName}`,
         );

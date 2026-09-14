@@ -110,6 +110,7 @@ export type FeishuAttachment = {
   kind: "image" | "file";
   fileKey: string;
   fileName?: string;
+  sourceMessageId?: string;
 };
 
 export type FeishuCardAction = {
