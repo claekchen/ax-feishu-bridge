@@ -161,6 +161,8 @@ export class FeishuMessageHandler {
       debugLog("feishu.handler.error", { messageId: msg.messageId, error: message });
       await markFeishuMessage(msg.messageId, "failed", message);
       await this.getTransport()?.replyText(msg.messageId, `Pi error: ${message}`);
+    } finally {
+      await this.getTransport()?.clearReaction(msg.messageId);
     }
   }
 

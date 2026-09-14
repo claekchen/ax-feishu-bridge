@@ -29,6 +29,7 @@ export class FeishuTransport {
   /** 本 bot 发出的消息 id，用于 alsoOnReply 判定 parent/root */
   private readonly botOutboundMessageIds = new Set<string>();
   private readonly botOutboundMessageOrder: string[] = [];
+  private readonly pendingReactions = new Map<string, Promise<string | undefined>>();
   private readonly markdownCopySources = new Map<string, string>();
   private readonly markdownCopySourceOrder: string[] = [];
   private markdownCopySeq = 0;
@@ -220,7 +221,7 @@ export class FeishuTransport {
     };
 
     if (cfg.reactEmoji) {
-      void this.addReaction(msg.messageId, cfg.reactEmoji);
+      this.startReaction(msg.messageId, cfg.reactEmoji);
     }
     debugLog("feishu.message.dispatch", { messageId: msg.messageId });
     void this.onMessage(msg).catch((error) => {
@@ -322,13 +323,33 @@ export class FeishuTransport {
     }
   }
 
-  private async addReaction(messageId: string, emojiType: string) {
+  startReaction(messageId: string, emojiType: string) {
+    this.pendingReactions.set(messageId, this.addReaction(messageId, emojiType));
+  }
+
+  async clearReaction(messageId: string) {
+    const pending = this.pendingReactions.get(messageId);
+    this.pendingReactions.delete(messageId);
+    if (!pending) return;
+    const reactionId = await pending;
+    if (!reactionId) return;
     try {
-      await this.sdkClient.im.messageReaction.create({
+      await this.sdkClient.im.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      });
+    } catch {}
+  }
+
+  private async addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
+    try {
+      const response = await this.sdkClient.im.messageReaction.create({
         path: { message_id: messageId },
         data: { reaction_type: { emoji_type: emojiType } },
       });
-    } catch {}
+      return response?.data?.reaction_id;
+    } catch {
+      return undefined;
+    }
   }
 
   async replyText(messageId: string, text: string) {
