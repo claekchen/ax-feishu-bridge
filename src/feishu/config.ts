@@ -107,6 +107,7 @@ export const DEFAULT_CONFIG: Pick<
   | "cardActionWebhookPath"
   | "language"
   | "reactEmoji"
+  | "mentionRequesterOnComplete"
   | "autoStart"
   | "parseInteractiveCards"
   | "includeQuotedMessage"
@@ -135,6 +136,7 @@ export const DEFAULT_CONFIG: Pick<
   cardActionWebhookPath: "/webhook/card",
   language: "zh",
   reactEmoji: "Get",
+  mentionRequesterOnComplete: false,
   autoStart: true,
   parseInteractiveCards: true,
   includeQuotedMessage: true,
@@ -246,6 +248,7 @@ function applyRuntimeDefaults(cfg: FeishuConfig): FeishuConfig {
       : (cfg.groupKeywords ?? DEFAULT_CONFIG.groupKeywords),
     groupAlsoOnReply: cfg.groupAlsoOnReply ?? DEFAULT_CONFIG.groupAlsoOnReply,
     ignoreBotMessages: cfg.ignoreBotMessages ?? DEFAULT_CONFIG.ignoreBotMessages,
+    mentionRequesterOnComplete: cfg.mentionRequesterOnComplete ?? DEFAULT_CONFIG.mentionRequesterOnComplete,
     parseInteractiveCards: cfg.parseInteractiveCards ?? DEFAULT_CONFIG.parseInteractiveCards,
     includeQuotedMessage: cfg.includeQuotedMessage ?? DEFAULT_CONFIG.includeQuotedMessage,
     quotedMessageMaxChars: cfg.quotedMessageMaxChars ?? DEFAULT_CONFIG.quotedMessageMaxChars,
@@ -291,6 +294,7 @@ export function loadBaseConfig(): FeishuConfig | undefined {
       cardActionWebhookPath: normalizeWebhookPath(env("CARD_ACTION_WEBHOOK_PATH")) || DEFAULT_CONFIG.cardActionWebhookPath,
       language: (env("LANGUAGE") as "zh" | "en") || DEFAULT_CONFIG.language,
       reactEmoji: env("REACT_EMOJI") || DEFAULT_CONFIG.reactEmoji,
+      mentionRequesterOnComplete: parseBool(env("MENTION_REQUESTER_ON_COMPLETE"), DEFAULT_CONFIG.mentionRequesterOnComplete!),
       autoStart: env("AUTO_START") ? env("AUTO_START") !== "0" : DEFAULT_CONFIG.autoStart,
       parseInteractiveCards: parseBool(env("PARSE_INTERACTIVE_CARDS"), DEFAULT_CONFIG.parseInteractiveCards!),
       includeQuotedMessage: parseBool(env("INCLUDE_QUOTED_MESSAGE"), DEFAULT_CONFIG.includeQuotedMessage!),
@@ -325,6 +329,7 @@ export function loadBaseConfig(): FeishuConfig | undefined {
     cardActionWebhookPath: normalizeWebhookPath(cfg.cardActionWebhookPath) || DEFAULT_CONFIG.cardActionWebhookPath,
     language: cfg.language || DEFAULT_CONFIG.language,
     reactEmoji: cfg.reactEmoji || DEFAULT_CONFIG.reactEmoji,
+    mentionRequesterOnComplete: cfg.mentionRequesterOnComplete,
     autoStart: cfg.autoStart ?? DEFAULT_CONFIG.autoStart,
     parseInteractiveCards: cfg.parseInteractiveCards,
     includeQuotedMessage: cfg.includeQuotedMessage,

@@ -455,6 +455,28 @@ export class FeishuTransport {
     return `${Date.now().toString(36)}-${this.markdownCopySeq.toString(36)}`;
   }
 
+  async replyCompletionMention(messageId: string, userOpenId: string) {
+    const primaryLocale = this.config.language === "en" ? "en_us" : "zh_cn";
+    const fallbackLocale = primaryLocale === "en_us" ? "zh_cn" : "en_us";
+    const content = (text: string) => ({
+      content: [[
+        { tag: "at", user_id: userOpenId },
+        { tag: "text", text },
+      ]],
+    });
+    const res = await this.sdkClient.im.message.reply({
+      path: { message_id: messageId },
+      data: {
+        msg_type: "post",
+        content: JSON.stringify({
+          [primaryLocale]: content(primaryLocale === "en_us" ? " Reply complete" : " 回复完成"),
+          [fallbackLocale]: content(fallbackLocale === "en_us" ? " Reply complete" : " 回复完成"),
+        }),
+      },
+    });
+    this.rememberBotOutboundMessageId((res as any)?.data?.message_id as string | undefined);
+  }
+
   async replyPost(messageId: string, text: string) {
     debugLog("feishu.reply.post", { messageId, length: text.length });
     for (const post of buildPostMessages(text, this.config.language)) {

@@ -23,6 +23,7 @@ function baseCfg(partial: Record<string, unknown> = {}) {
     groupAlsoOnReply: false,
     language: "zh" as const,
     reactEmoji: "Get",
+    mentionRequesterOnComplete: false,
     streamingReply: true,
     streamPrintFrequencyMs: 50,
     streamPrintStep: 1,
@@ -36,6 +37,7 @@ test("isRuntimeConfigKey only allows whitelist", () => {
   assert.equal(isRuntimeConfigKey("groupPolicy"), true);
   assert.equal(isRuntimeConfigKey("streamingReply"), true);
   assert.equal(isRuntimeConfigKey("ignoreBotMessages"), true);
+  assert.equal(isRuntimeConfigKey("mentionRequesterOnComplete"), true);
   assert.equal(isRuntimeConfigKey("appId"), false);
   assert.equal(isRuntimeConfigKey("appSecret"), false);
   assert.equal(isRuntimeConfigKey("cardActionMode"), false);
@@ -51,6 +53,7 @@ test("parseRuntimeConfigValue for keywords / bool / enum / number", () => {
   assert.deepEqual(parseRuntimeConfigValue("groupAlsoOnReply", "0"), { ok: true, value: false });
   assert.deepEqual(parseRuntimeConfigValue("ignoreBotMessages", "false"), { ok: true, value: false });
   assert.deepEqual(parseRuntimeConfigValue("ignoreBotMessages", "1"), { ok: true, value: true });
+  assert.deepEqual(parseRuntimeConfigValue("mentionRequesterOnComplete", "true"), { ok: true, value: true });
   assert.deepEqual(parseRuntimeConfigValue("groupPolicy", "open"), { ok: true, value: "open" });
   assert.equal(parseRuntimeConfigValue("groupPolicy", "admin").ok, false);
   assert.deepEqual(parseRuntimeConfigValue("language", "en"), { ok: true, value: "en" });
