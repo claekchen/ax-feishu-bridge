@@ -10,7 +10,7 @@ import {
   getRuntimeOverrides,
   setRuntimeConfig,
 } from "./runtime-config.ts";
-import { conversationKey, conversationLabel, buildPromptWithQuote, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap } from "./messages.ts";
+import { conversationKey, conversationLabel, buildPromptWithQuote, buildPromptWithRecentMessages, getCommandList, normalizeForDedupe, parseBotCommand, parseMessageInput, pruneRecentMap } from "./messages.ts";
 import { ReplyCard } from "./reply-card.ts";
 import type { FeishuBridgeStore } from "./bridge-store.ts";
 import type { FeishuTransport } from "./transport.ts";
@@ -56,6 +56,7 @@ export class FeishuMessageHandler {
       });
       let text = parsed.text || "";
       const key = conversationKey(msg);
+      const previousRoute = this.bridgeStore?.getRoute(key);
       this.bridgeStore?.bindConversation(key, msg);
 
       // 展开引用/回复的父消息（告警卡片场景）
@@ -106,6 +107,15 @@ export class FeishuMessageHandler {
         return;
       }
 
+      const recentMessages = cfg?.groupRecentMessageLimit && msg.chatType === "group" && previousRoute
+        ? await transport.getRecentGroupMessages(
+          msg.chatId,
+          previousRoute.updatedAt,
+          [previousRoute.lastMessageId, msg.messageId],
+          cfg.groupRecentMessageLimit,
+        )
+        : [];
+
       const model = await this.conversations.getSelectedModel(key);
       const modelSupportsImage = Boolean(model?.supportsImage);
       debugLog("feishu.handler.model", {
@@ -134,7 +144,10 @@ export class FeishuMessageHandler {
       }
 
       const basePrompt = buildPrompt(msg, text, fileSections, imageInputs, skippedImageCount, modelSupportsImage, downloadErrors);
-      const prompt = buildPromptWithQuote(basePrompt, quoted);
+      const prompt = buildPromptWithRecentMessages(
+        buildPromptWithQuote(basePrompt, quoted),
+        recentMessages,
+      );
       // 单卡：全程 header；流式参数来自 config/env
       const useStreaming = cfg?.streamingReply !== false;
       const card = new ReplyCard(key, msg.messageId, transport, {
