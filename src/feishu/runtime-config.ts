@@ -8,6 +8,7 @@ export const RUNTIME_CONFIG_KEYS = [
   "groupPolicy",
   "groupKeywords",
   "groupAlsoOnReply",
+  "groupRecentMessageLimit",
   "ignoreBotMessages",
   "reactEmoji",
   "language",
@@ -24,6 +25,7 @@ export type RuntimeConfigView = {
   groupPolicy?: "open" | "mention";
   groupKeywords?: string[];
   groupAlsoOnReply?: boolean;
+  groupRecentMessageLimit?: number;
   ignoreBotMessages?: boolean;
   reactEmoji?: string;
   language?: "zh" | "en";
@@ -88,6 +90,13 @@ export function parseRuntimeConfigValue(key: string, raw: string): ParseResult {
     case "reactEmoji": {
       if (!text) return { ok: false, error: "reactEmoji 不能为空" };
       return { ok: true, value: text };
+    }
+    case "groupRecentMessageLimit": {
+      const n = Number.parseInt(text, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 50) {
+        return { ok: false, error: `${key} 必须是 0 到 50 的整数` };
+      }
+      return { ok: true, value: n };
     }
     case "streamPrintFrequencyMs":
     case "streamPrintStep":

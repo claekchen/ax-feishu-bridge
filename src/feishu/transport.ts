@@ -500,6 +500,61 @@ export class FeishuTransport {
     });
   }
 
+  async getRecentGroupMessages(
+    chatId: string,
+    sinceMs: number,
+    excludedMessageIds: string[],
+    limit: number,
+  ): Promise<Array<{ sender: string; text: string }>> {
+    if (!chatId || limit <= 0) return [];
+    try {
+      const res = await this.apiCall<any>("feishu.list_recent_messages", () =>
+        this.sdkClient.im.v1.message.list({
+          params: {
+            container_id_type: "chat",
+            container_id: chatId,
+            start_time: String(Math.floor(sinceMs / 1000)),
+            sort_type: "ByCreateTimeDesc",
+            page_size: 50,
+            card_msg_content_type: "raw_card_content",
+          },
+        }),
+      );
+      const excluded = new Set(excludedMessageIds);
+      const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+      return items
+        .filter((item: any) => {
+          const messageId = String(item?.message_id || "");
+          const senderId = String(item?.sender?.id || "");
+          return messageId
+            && !excluded.has(messageId)
+            && !this.botOutboundMessageIds.has(messageId)
+            && senderId !== this.config.appId;
+        })
+        .map((item: any) => {
+          const extracted = extractTextFromMsgType(
+            String(item?.msg_type || "unknown"),
+            String(item?.body?.content || ""),
+            this.botOpenId,
+          );
+          return {
+            sender: String(item?.sender?.sender_name || item?.sender?.id || "unknown"),
+            text: extracted.text.trim(),
+          };
+        })
+        .filter((item: any) => item.text)
+        .slice(0, limit)
+        .reverse()
+        .map(({ sender, text }: any) => ({ sender, text }));
+    } catch (error) {
+      debugLog("feishu.list_recent_messages.error", {
+        chatId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  }
+
   /** 拉取单条消息（用于展开 parent/root 引用卡片） */
   async getMessage(messageId: string): Promise<{ messageId: string; msgType: string; content: string; chatId?: string } | undefined> {
     if (!messageId) return undefined;

@@ -309,6 +309,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `FEISHU_GROUP_POLICY` | `open` 或 `mention`，默认 `open`  |
 | `FEISHU_GROUP_KEYWORDS` | 群聊关键词，逗号或分号分隔；命中后无需 @ |
 | `FEISHU_GROUP_ALSO_ON_REPLY` | `1` 时回复机器人消息可继续追问，无需再次 @ |
+| `FEISHU_GROUP_RECENT_MESSAGE_LIMIT` | 自动补齐两次机器人交互之间的群消息数，`0` 关闭，最大 `50` |
 | `FEISHU_IGNORE_BOT_MESSAGES` | 是否忽略其他机器人消息，默认 `true` |
 | `FEISHU_LANGUAGE`     | `zh` 或 `en`                   |
 | `FEISHU_REACT_EMOJI`  | 收到消息时的表情回应，默认 `Get`      |
@@ -337,6 +338,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | --------------------- | ----------------------------- |
 | `promptNotifySec`     | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `promptTimeoutSec`    | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
+| `groupRecentMessageLimit` | 自动补齐两次机器人交互之间的群消息数，`0` 关闭，最大 `50` |
 
 > 注意：长时间任务（例如跑测试、构建、批量处理）默认**不会**再被报为“任务失败”——到达 `promptNotifySec` 后只会在飞书里提示“任务仍在处理中”，回复卡片保持“回复中”，完成后正常送达结果。只有显式设置 `promptTimeoutSec` 后才会硬超时。修改后请执行 `/feishu restart` 生效。
 
@@ -348,12 +350,15 @@ Windows PATH 加入 C:\Program Files\Git\bin
 /config
 /config groupKeywords 报警,告警
 /config groupAlsoOnReply true
+/config groupRecentMessageLimit 20
 /config streamingReply false
 /config clear groupKeywords
 /config clear all
 ```
 
-可热更新的范围仅包括 `groupPolicy`、`groupKeywords`、`groupAlsoOnReply`、`ignoreBotMessages`、`reactEmoji`、`language` 以及流式展示参数；应用凭证、引用消息展开和连接方式不能通过聊天修改。
+可热更新的范围仅包括 `groupPolicy`、`groupKeywords`、`groupAlsoOnReply`、`groupRecentMessageLimit`、`ignoreBotMessages`、`reactEmoji`、`language` 以及流式展示参数；应用凭证、引用消息展开和连接方式不能通过聊天修改。
+
+自动读取群聊中间消息需要应用拥有飞书“获取群组中所有消息”权限；权限不足时会跳过补齐，不影响当前提问。
 
 ***
 
