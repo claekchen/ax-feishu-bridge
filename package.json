@@ -71,7 +71,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "prepare": "npm run build",
-    "test": "node --experimental-strip-types --experimental-transform-types --import ./test/register.mjs --test test/*.test.mjs test/*.test.ts"
+    "test": "node --experimental-strip-types --experimental-transform-types --import ./test/register.mjs --test test/*.test.mjs test/*.test.ts",
+    "prepack": "npm run build"
   }
 }
