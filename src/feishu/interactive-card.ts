@@ -48,38 +48,41 @@ export function extractInteractiveElementText(
   depth = 0,
 ): string[] {
   if (depth > 12 || !isRecord(element)) return [];
+  const property = isRecord(element.property) ? element.property : undefined;
+  const node = property ? { ...element, ...property } : element;
   const parts: string[] = [];
-  const tag = typeof element.tag === "string" ? element.tag : "";
+  const tag = typeof node.tag === "string" ? node.tag : "";
 
   if (tag === "img" || tag === "image") {
-    const key = typeof element.img_key === "string" ? element.img_key : typeof element.image_key === "string" ? element.image_key : undefined;
+    const key = typeof node.img_key === "string" ? node.img_key : typeof node.image_key === "string" ? node.image_key : undefined;
     if (key) attachments.push({ kind: "image", fileKey: key });
   }
 
   if (tag === "div" || tag === "markdown" || tag === "lark_md" || tag === "plain_text" || tag === "note") {
-    const direct = extractFromTextObject(element.text, variables);
+    const direct = extractFromTextObject(node.text, variables);
     if (direct) parts.push(direct);
-    if (typeof element.content === "string") pushText(parts, element.content, variables);
+    if (typeof node.content === "string") pushText(parts, node.content, variables);
+    if (typeof node.text === "string") pushText(parts, node.text, variables);
   }
 
   if (tag === "button") {
-    const label = extractFromTextObject(element.text, variables);
+    const label = extractFromTextObject(node.text, variables);
     if (label) parts.push(`[按钮] ${label}`);
   }
 
-  if (tag === "column_set" && Array.isArray(element.columns)) {
-    for (const column of element.columns) {
+  if (tag === "column_set" && Array.isArray(node.columns)) {
+    for (const column of node.columns) {
       parts.push(...extractInteractiveElementText(column, variables, attachments, depth + 1));
     }
   }
 
-  if (Array.isArray(element.elements)) {
-    for (const child of element.elements) {
+  if (Array.isArray(node.elements)) {
+    for (const child of node.elements) {
       parts.push(...extractInteractiveElementText(child, variables, attachments, depth + 1));
     }
   }
-  if (Array.isArray(element.fields)) {
-    for (const field of element.fields) {
+  if (Array.isArray(node.fields)) {
+    for (const field of node.fields) {
       if (!isRecord(field)) continue;
       const fieldText = extractFromTextObject(field.text, variables);
       if (fieldText) parts.push(fieldText);
@@ -88,8 +91,8 @@ export function extractInteractiveElementText(
 
   // schema 2.0 / 嵌套容器兜底
   for (const key of ["body", "header", "card"]) {
-    if (isRecord(element[key])) {
-      parts.push(...extractInteractiveElementText(element[key], variables, attachments, depth + 1));
+    if (isRecord(node[key])) {
+      parts.push(...extractInteractiveElementText(node[key], variables, attachments, depth + 1));
     }
   }
 
@@ -138,9 +141,12 @@ export function extractTextFromInteractiveCard(
     return { text: fallback, attachments };
   }
 
-  // 部分事件 content 包一层 { type, data: { card } } 或 { card }
+  // Events may wrap cards in { type, data: { card } }, { card }, or raw CardKit { json_card }.
   if (isRecord(parsed)) {
-    if (parsed.type === "interactive" && isRecord(parsed.card)) parsed = parsed.card;
+    if (typeof parsed.json_card === "string") {
+      try { parsed = JSON.parse(parsed.json_card); } catch {}
+    } else if (isRecord(parsed.json_card)) parsed = parsed.json_card;
+    else if (parsed.type === "interactive" && isRecord(parsed.card)) parsed = parsed.card;
     else if (isRecord(parsed.card)) parsed = parsed.card;
     else if (isRecord(parsed.data) && isRecord((parsed.data as Record<string, unknown>).card)) {
       parsed = (parsed.data as Record<string, unknown>).card;

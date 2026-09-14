@@ -505,7 +505,10 @@ export class FeishuTransport {
     if (!messageId) return undefined;
     try {
       const res = await this.apiCall<any>("feishu.get_message", () =>
-        this.sdkClient.im.message.get({ path: { message_id: messageId } }),
+        this.sdkClient.im.message.get({
+          path: { message_id: messageId },
+          params: { card_msg_content_type: "raw_card_content" },
+        }),
       );
       const item = res?.data?.items?.[0] || res?.data?.message || res?.data;
       if (!item) return undefined;
