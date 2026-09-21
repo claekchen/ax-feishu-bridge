@@ -19,6 +19,7 @@ import { normalizeThinkingLevels, type ThinkingStatus } from "../../feishu/think
 import type { FeishuState } from "../../feishu/types.ts";
 import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
+import { askJevDifficulty, feishuRouterEnabled, FLASH_MODEL, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -97,11 +98,17 @@ export class PiConversationRuntime implements ConversationRuntime {
     onReply: (text: string) => Promise<void>,
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
+    preferredModel?: RuntimeModel,
   ) {
     const previous = this.previousTurn(key);
     const next = previous.then(async () => {
       debugLog("feishu.prompt.start", { key, textLength: userText.length, imageCount: images.length });
       const session = await this.ensureSessionFresh(key);
+      if (preferredModel && !modelMatches(session.model, preferredModel)) {
+        const modelRuntime = await this.getModelRuntime();
+        const nextModel = modelRuntime.getModel(preferredModel.provider, preferredModel.id);
+        if (nextModel && modelRuntime.hasConfiguredAuth(nextModel)) await session.setModel(nextModel);
+      }
       const run: ActiveRun = { session, runId: status?.runId, stopped: false, status, onDelta };
       this.activeRuns.set(key, run);
       this.bridge?.beginFeishuInput(session.sessionId);
@@ -118,14 +125,24 @@ export class PiConversationRuntime implements ConversationRuntime {
         };
       }
       try {
+        let retried = false;
         try {
           await this.runPromptWithTimeouts(session, userText, images, key, onReply, status);
+          if (feishuRouterEnabled() && !run.stopped && lastAssistantFailed(session)) {
+            retried = true;
+            await this.retryOnFlash(session, key, onReply, status);
+          }
         } catch (error) {
           if (run.stopped) {
             debugLog("feishu.prompt.stopped", { key });
             return;
           }
-          throw error;
+          if (feishuRouterEnabled() && !retried) {
+            retried = true;
+            await this.retryOnFlash(session, key, onReply, status);
+          } else {
+            throw error;
+          }
         }
       } finally {
         try { unsub?.(); } catch {}
@@ -172,7 +189,9 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   async getActualModel(key: string) {
-    const model = await this.getSelectedModel(key);
+    const cached = this.sessions.get(key);
+    const activeModel = cached ? (await cached).model : undefined;
+    const model = activeModel ? toRuntimeModel(activeModel) : await this.getSelectedModel(key);
     if (!model) return "默认模型";
     return `${model.provider}/${model.id}`;
   }
@@ -445,6 +464,55 @@ export class PiConversationRuntime implements ConversationRuntime {
     return native ? toRuntimeModel(native) : undefined;
   }
 
+  async routeModel(key: string, prompt: string, hasImages = false): Promise<RuntimeModel | undefined> {
+    if (!feishuRouterEnabled()) return this.getSelectedModel(key);
+    const session = await this.ensureSessionFresh(key);
+    const modelRuntime = await this.getModelRuntime();
+    const priority = isPriorityRequest(this.getWorkspace(key), prompt) || hasImages;
+    const selected = this.state.models?.[key];
+    let target: Pick<RuntimeModel, "provider" | "id"> | undefined;
+    if (priority) {
+      target = SOL_MODEL;
+    } else if (selected && !modelMatches(selected, FLASH_MODEL)) {
+      return this.getSelectedModel(key);
+    } else {
+      try {
+        const history = (session.messages || []).slice(-8).map((msg: any) => {
+          const content = Array.isArray(msg.content)
+            ? msg.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ")
+            : typeof msg.content === "string" ? msg.content : "";
+          return `${msg.role}: ${content.slice(0, 1000)}`;
+        }).join("\n");
+        target = await askJevDifficulty(prompt, history);
+      } catch (error) {
+        debugLog("feishu.router.jev_error", { key, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (target) {
+      const model = modelRuntime.getModel(target.provider, target.id);
+      if (model && modelRuntime.hasConfiguredAuth(model) && (!hasImages || toRuntimeModel(model).supportsImage)) {
+        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority });
+        return toRuntimeModel(model);
+      }
+    }
+    return this.getSelectedModel(key);
+  }
+
+  private async retryOnFlash(session: AgentSession, key: string, onReply: (text: string) => Promise<void>, status?: ReplyCardSink) {
+    const modelRuntime = await this.getModelRuntime();
+    const fallback = modelRuntime.getModel(FLASH_MODEL.provider, FLASH_MODEL.id);
+    if (!fallback || !modelRuntime.hasConfiguredAuth(fallback)) throw new Error("DeepSeek 4.1 Flash fallback is unavailable");
+    const from = session.model ? `${session.model.provider}/${session.model.id}` : "unknown";
+    if (!modelMatches(session.model, FLASH_MODEL)) await session.setModel(fallback);
+    debugLog("feishu.router.retry", { key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}` });
+    await this.runPromptWithTimeouts(
+      session,
+      "The previous model failed. Continue the user's last request from the existing conversation context. Do not repeat completed tool actions.",
+      [], key, onReply, status,
+    );
+    if (lastAssistantFailed(session)) throw new Error("DeepSeek 4.1 Flash retry failed");
+  }
+
   /** 内部使用的原生 Pi 模型（不跨出本适配器）。 */
   private async getSelectedNativeModel(key: string) {
     const modelRuntime = await this.getModelRuntime();
@@ -633,6 +701,12 @@ export class PiConversationRuntime implements ConversationRuntime {
     const loader = new DefaultResourceLoader({
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
+      extensionsOverride: (base) => ({
+        ...base,
+        extensions: feishuRouterEnabled()
+          ? base.extensions.filter((extension) => !extension.path.endsWith("/model-failover.ts"))
+          : base.extensions,
+      }),
       systemPromptOverride: (base) => {
         const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables.";
         return base?.trim() ? `${base}\n\n${extra}` : extra;
@@ -811,6 +885,11 @@ function extractLastAssistantText(session: AgentSession): string {
     }
   }
   return "";
+}
+
+function lastAssistantFailed(session: AgentSession): boolean {
+  const message = [...(session.messages || [])].reverse().find((item: any) => item.role === "assistant") as any;
+  return message?.stopReason === "error";
 }
 
 /** 把 Pi 原生模型对象转换成平台无关的 RuntimeModel（禁止原生对象泄漏到飞书层）。 */

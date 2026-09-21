@@ -116,7 +116,9 @@ export class FeishuMessageHandler {
         )
         : [];
 
-      const model = await this.conversations.getSelectedModel(key);
+      const routingPrompt = buildPromptWithRecentMessages(buildPromptWithQuote(text, quoted), recentMessages);
+      const routedModel = await this.conversations.routeModel?.(key, routingPrompt, parsed.attachments.some((item) => item.kind === "image"));
+      const model = routedModel ?? await this.conversations.getSelectedModel(key);
       const modelSupportsImage = Boolean(model?.supportsImage);
       debugLog("feishu.handler.model", {
         messageId: msg.messageId,
@@ -177,6 +179,7 @@ export class FeishuMessageHandler {
         },
         card,
         useStreaming ? (delta) => card.append(delta) : undefined,
+        model,
       );
       await markFeishuMessage(msg.messageId, "replied");
     } catch (error) {

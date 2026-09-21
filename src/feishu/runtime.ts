@@ -65,7 +65,10 @@ export interface ConversationRuntime {
     onReply: (text: string) => Promise<void>,
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
+    preferredModel?: RuntimeModel,
   ): Promise<void>;
+
+  routeModel?(key: string, prompt: string, hasImages: boolean): Promise<RuntimeModel | undefined>;
 
   /** 供 /status 使用 */
   getStatus(key: string): ConversationStatus;
