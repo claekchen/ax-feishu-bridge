@@ -732,6 +732,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     } as any);
 
     await session.bindExtensions({});
+    if (feishuRouterEnabled()) session.setAutoRetryEnabled(false);
     this.bridge?.attachSession(key, session.sessionId);
     // 会话级长期订阅：保证 text_delta 在 prompt 期间一定能收到
     session.subscribe((event: any) => {
