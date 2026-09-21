@@ -6,6 +6,7 @@ import type { RuntimeModel } from "../../feishu/runtime.ts";
 export const FLASH_MODEL = { provider: "kaon", id: "aliyunus/deepseek-v4.1-flash" };
 export const SOL_MODEL = { provider: "cliproxyapi", id: "gpt-5.6-sol" };
 export const TERRA_MODEL = { provider: "cliproxyapi", id: "gpt-5.6-terra" };
+export const ASTRA_MODEL = { provider: "cliproxyapi", id: "gpt-6-astra" };
 const JEV_URL = "https://kaon-router.kaonai.com/api/alpha/decisions";
 const JEV_MODEL = "openrouter/~typesafe/jev-latest";
 
@@ -28,13 +29,14 @@ export function isPriorityRequest(workspace: string, prompt: string) {
     || /(?:codex[\s_-]*review|review[\s_-]*codex|代码审查|代码评审|审查\s*(?:pr|pull request)|review\s*(?:pr|pull request)|(?:pr|pull request)\s*review)/i.test(prompt);
 }
 
-export function modelForDifficulty(answer: unknown): typeof FLASH_MODEL | typeof TERRA_MODEL | typeof SOL_MODEL | undefined {
+export function modelForDifficulty(answer: unknown): typeof FLASH_MODEL | typeof TERRA_MODEL | typeof SOL_MODEL | typeof ASTRA_MODEL | undefined {
   if (!answer || typeof answer !== "object") return;
   const value = answer as { score?: unknown; confidence?: unknown };
   if (typeof value.score !== "number" || !Number.isFinite(value.score)
     || typeof value.confidence !== "number" || value.confidence < 0.6) return;
-  const level = value.score <= 1 ? value.score * 2 : value.score;
+  const level = value.score;
   if (level <= 0.5) return FLASH_MODEL;
+  if (level >= 2.5) return ASTRA_MODEL;
   if (level >= 1.5) return SOL_MODEL;
   return TERRA_MODEL;
 }
@@ -68,8 +70,8 @@ export async function askJevDifficulty(prompt: string, history: string, fetcher:
       questions: {
         difficulty: {
           type: "score",
-          instructions: "Rate the current request: trivial for greetings, simple lookup or mechanical edits; moderate for ordinary coding tasks; complex for subtle debugging, architecture or multi-file work.",
-          criteria: ["trivial", "moderate", "complex"],
+          instructions: "Rate the current request: trivial for greetings, simple lookup or mechanical edits; moderate for ordinary coding tasks; complex for multi-file debugging or architecture; extreme for difficult multi-system architecture, security-sensitive work or subtle concurrency.",
+          criteria: ["trivial", "moderate", "complex", "extreme"],
         },
       },
     }),

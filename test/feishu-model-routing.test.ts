@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isPriorityRequest, modelForDifficulty, FLASH_MODEL, SOL_MODEL, TERRA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, SOL_MODEL, TERRA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 import { PiConversationRuntime } from "../src/adapters/pi/PiConversationRuntime.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,12 +13,12 @@ test("priority routing recognizes KDH workspaces and Codex review requests", () 
   assert.equal(isPriorityRequest("/srv/work/other", "简单问候"), false);
 });
 
-test("Jev difficulty maps to three authenticated model tiers conservatively", () => {
+test("Jev difficulty maps to four model tiers conservatively", () => {
   assert.deepEqual(modelForDifficulty({ score: 0.1, confidence: 0.95 }), FLASH_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), SOL_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 1.0 + Number.EPSILON, confidence: 0.95 }), TERRA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), TERRA_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 1.99, confidence: 0.99 }), SOL_MODEL);
-  assert.equal(modelForDifficulty({ score: 2, confidence: 0.3 }), undefined);
+  assert.deepEqual(modelForDifficulty({ score: 3, confidence: 1 }), ASTRA_MODEL);
+  assert.equal(modelForDifficulty({ score: 3, confidence: 0.3 }), undefined);
   assert.equal(modelForDifficulty({ confidence: 1 }), undefined);
 });
 
