@@ -17,13 +17,16 @@ import type { ResumeScope, ResumeSessionPage } from "../../feishu/cards.ts";
 import type { ReplyCardSink } from "../../feishu/reply-card.ts";
 import { normalizeThinkingLevels, type ThinkingStatus } from "../../feishu/thinking.ts";
 import type { FeishuState } from "../../feishu/types.ts";
-import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
+import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts, FeishuMessageContext } from "../../feishu/runtime.ts";
+import type { FeishuTransport } from "../../feishu/transport.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
 import { createFlashFallbackExtension } from "./feishu-model-fallback.ts";
 import { createFeishuSessionSettings } from "./feishu-session-settings.ts";
 import { feishuRouterEnabled, FLASH_MODEL, isManualSelection, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
 import { JevDecisionClient } from "./feishu-jev-client.ts";
 import { ContinuationRouting } from "./feishu-continuation-routing.ts";
+import { createFeishuContextExtension } from "./feishu-context-tools.ts";
+import { appendFeishuSystemPrompt } from "./feishu-system-prompt.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -40,6 +43,7 @@ type ActiveRun = {
   toolCalls: number;
   usage: Record<string, { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }>;
   status?: ReplyCardSink;
+  messageContext?: FeishuMessageContext;
   /** 当前轮流式回调（由 promptWithImages 设置） */
   onDelta?: (delta: string) => void;
 };
@@ -69,15 +73,18 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly cwd: string;
   private readonly bridge?: FeishuBridgeRuntime;
   private readonly timeouts: ConversationTimeouts;
+  private readonly getTransport?: () => FeishuTransport | undefined;
 
   constructor(
     cwd: string,
     bridge?: FeishuBridgeRuntime,
     timeouts: ConversationTimeouts = {},
+    getTransport?: () => FeishuTransport | undefined,
   ) {
     this.cwd = cwd;
     this.bridge = bridge;
     this.timeouts = timeouts;
+    this.getTransport = getTransport;
     ensureRoot();
     this.state = readJson<FeishuState>(STATE_PATH, { sessions: {} });
     this.state.sessions ||= {};
@@ -112,6 +119,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     onDelta?: (delta: string) => void,
     preferredModel?: RuntimeModel,
     currentRequest?: string,
+    messageContext?: FeishuMessageContext,
   ) {
     const previous = this.previousTurn(key);
     let routingGeneration = this.routingGeneration;
@@ -128,6 +136,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
       const run: ActiveRun = {
         session, runId: status?.runId, stopped: false, status, onDelta,
+        messageContext: messageContext ? { ...messageContext } : undefined,
         startedAt: Date.now(), toolCalls: 0, usage: {},
       };
       this.activeRuns.set(key, run);
@@ -809,23 +818,26 @@ export class PiConversationRuntime implements ConversationRuntime {
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
       settingsManager,
-      extensionFactories: feishuRouterEnabled() ? [createFlashFallbackExtension({
-        settings: settingsManager,
-        getRun: () => this.activeRuns.get(key),
-        onFallback: (from, error) => debugLog("feishu.router.retry", {
-          key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}`, error,
-        }),
-      })] : [],
+      extensionFactories: [
+        ...(this.getTransport ? [createFeishuContextExtension({
+          getTransport: this.getTransport,
+          getScope: () => this.activeRuns.get(key)?.messageContext,
+        })] : []),
+        ...(feishuRouterEnabled() ? [createFlashFallbackExtension({
+          settings: settingsManager,
+          getRun: () => this.activeRuns.get(key),
+          onFallback: (from, error) => debugLog("feishu.router.retry", {
+            key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}`, error,
+          }),
+        })] : []),
+      ],
       extensionsOverride: (base) => ({
         ...base,
         extensions: feishuRouterEnabled()
           ? base.extensions.filter((extension) => !extension.path.endsWith("/model-failover.ts"))
           : base.extensions,
       }),
-      systemPromptOverride: (base) => {
-        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables.";
-        return base?.trim() ? `${base}\n\n${extra}` : extra;
-      },
+      appendSystemPromptOverride: appendFeishuSystemPrompt,
     });
 
     const previousChildEnv = process.env[CHILD_SESSION_ENV];

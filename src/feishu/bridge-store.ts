@@ -17,7 +17,10 @@ export class FeishuBridgeStore {
       chatId: msg.chatId,
       chatType: msg.chatType,
       threadMessageId: routeThreadMessageId(msg, previous),
+      threadId: msg.threadId || previous?.threadId,
       lastMessageId: msg.messageId,
+      lastContextMessageId: previous?.lastContextMessageId,
+      lastContextTime: previous?.lastContextTime,
       updatedAt: Date.now(),
     };
     state.routes[sessionKey] = route;
@@ -35,6 +38,16 @@ export class FeishuBridgeStore {
 
   getRoute(sessionKey: string): FeishuRoute | undefined {
     return this.read().routes[sessionKey];
+  }
+
+  /** Advance only after context reaches the agent, using event time rather than setup time. */
+  markContextSeen(sessionKey: string, msg: FeishuMessage, receivedAt: number) {
+    const state = this.read();
+    const route = state.routes[sessionKey];
+    const timestamp = msg.createTime ?? receivedAt;
+    if (!route || !Number.isFinite(timestamp) || timestamp < (route.lastContextTime ?? 0)) return;
+    state.routes[sessionKey] = { ...route, lastContextMessageId: msg.messageId, lastContextTime: timestamp };
+    this.write(state);
   }
 
   bindJob(sessionKey: string, jobId: string, jobName?: string, sessionId?: string): FeishuJobRoute | undefined {

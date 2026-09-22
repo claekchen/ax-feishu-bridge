@@ -18,6 +18,8 @@ export type RuntimeModel = {
   supportsImage?: boolean;
 };
 
+export type FeishuMessageContext = { chatId: string; threadId?: string; messageId?: string; createTime?: number };
+
 /** 会话运行状态（/status 命令使用）。 */
 export type ConversationStatus = {
   cwd: string;
@@ -67,6 +69,7 @@ export interface ConversationRuntime {
     onDelta?: (delta: string) => void,
     preferredModel?: RuntimeModel,
     currentRequest?: string,
+    messageContext?: FeishuMessageContext,
   ): Promise<void>;
 
   routeModel?(key: string, prompt: string, hasImages: boolean, currentRequest?: string): Promise<RuntimeModel | undefined>;

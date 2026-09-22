@@ -81,7 +81,10 @@ export type FeishuRoute = {
   chatId: string;
   chatType: "p2p" | "group";
   threadMessageId?: string;
+  threadId?: string;
   lastMessageId: string;
+  lastContextMessageId?: string;
+  lastContextTime?: number;
   updatedAt: number;
 };
 
@@ -109,6 +112,7 @@ export type FeishuMessage = {
   rootId?: string;
   parentId?: string;
   threadId?: string;
+  createTime?: number;
   mentions?: unknown[];
 };
 

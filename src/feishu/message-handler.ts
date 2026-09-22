@@ -41,6 +41,7 @@ export class FeishuMessageHandler {
   }
 
   async handle(msg: FeishuMessage) {
+    const receivedAt = Date.now();
     const transport = this.getTransport();
     if (!transport) return;
 
@@ -59,19 +60,46 @@ export class FeishuMessageHandler {
       const previousRoute = this.bridgeStore?.getRoute(key);
       this.bridgeStore?.bindConversation(key, msg);
 
-      // 展开引用/回复的父消息（告警卡片场景）
-      let quoted: { msgType: string; text: string } | null = null;
-      if (cfg?.includeQuotedMessage !== false && (msg.parentId || msg.rootId)) {
-        const q = await transport.getQuotedContext(
-          msg,
-          transport.getBotOpenId(),
-          cfg?.quotedMessageMaxChars ?? 8000,
-        );
-        if (q?.text) {
-          quoted = { msgType: q.msgType, text: q.text };
-          for (const a of q.attachments || []) parsed.attachments.push(a);
+      // Commands should not wait on context retrieval, especially /stop.
+      if (!parsed.attachments.length && text && await this.handleCommand(msg, key, text)) {
+        await markFeishuMessage(msg.messageId, "replied");
+        return;
+      }
+
+      const [q, history] = await Promise.all([
+        cfg?.includeQuotedMessage !== false && (msg.parentId || msg.rootId)
+          ? transport.getQuotedContext(msg, transport.getBotOpenId(), cfg?.quotedMessageMaxChars ?? 8000)
+          : null,
+        cfg?.groupRecentMessageLimit && msg.chatType === "group"
+          ? transport.getRecentGroupMessages(
+            msg.chatId,
+            previousRoute?.lastContextTime,
+            [previousRoute?.lastContextMessageId, msg.messageId].filter(Boolean) as string[],
+            cfg.groupRecentMessageLimit,
+            { threadId: msg.threadId, beforeMs: msg.createTime ?? receivedAt },
+          )
+          : [],
+      ]);
+      const quoted = q?.text || q?.attachments?.length ? {
+        msgType: q.msgType,
+        text: q.text || "[Referenced image or file attachment]",
+        messageIds: q.messageIds,
+      } : null;
+      for (const attachment of q?.attachments || []) {
+        if (!parsed.attachments.some((item) => item.kind === attachment.kind && item.fileKey === attachment.fileKey)) {
+          parsed.attachments.push(attachment);
         }
       }
+      const quotedIds = new Set(q?.messageIds || []);
+      const recentMessages = history.filter((item) => !item.messageId || !quotedIds.has(item.messageId));
+      debugLog("feishu.handler.context", {
+        messageId: msg.messageId, key, scope: msg.threadId ? "thread" : "chat",
+        historyCount: recentMessages.filter((item) => !item.notice).length,
+        historyChars: recentMessages.reduce((total, item) => total + item.text.length, 0),
+        historyNotices: recentMessages.filter((item) => item.notice).map((item) => item.notice),
+        quotedMessageIds: q?.messageIds, quotedChars: q?.text?.length ?? 0,
+        quotedFailures: q?.failures, quotedTruncated: q?.truncated,
+      });
 
       debugLog("feishu.handler.parsed", {
         messageId: msg.messageId,
@@ -93,28 +121,12 @@ export class FeishuMessageHandler {
           await markFeishuMessage(msg.messageId, "ignored");
           return;
         }
-        if (text) {
-          const handled = await this.handleCommand(msg, key, text);
-          if (handled) {
-            await markFeishuMessage(msg.messageId, "replied");
-            return;
-          }
-        }
       }
 
       if (this.isDuplicateContent(msg, key, text, parsed.attachments)) {
         await markFeishuMessage(msg.messageId, "ignored");
         return;
       }
-
-      const recentMessages = cfg?.groupRecentMessageLimit && msg.chatType === "group" && previousRoute
-        ? await transport.getRecentGroupMessages(
-          msg.chatId,
-          previousRoute.updatedAt,
-          [previousRoute.lastMessageId, msg.messageId],
-          cfg.groupRecentMessageLimit,
-        )
-        : [];
 
       const model = await this.conversations.getSelectedModel(key, parsed.attachments.some((item) => item.kind === "image"));
       const modelSupportsImage = Boolean(model?.supportsImage);
@@ -128,7 +140,7 @@ export class FeishuMessageHandler {
       const processed = await this.processAttachments(msg, parsed.attachments, modelSupportsImage);
       const { imageInputs, fileSections, downloadErrors, skippedImageCount } = processed;
 
-      if (skippedImageCount > 0 && imageInputs.length === 0 && !fileSections.length && !text.trim()) {
+      if (skippedImageCount > 0 && imageInputs.length === 0 && !fileSections.length && !text.trim() && !q?.text?.trim()) {
         await transport.replyText(
           msg.messageId,
           "当前模型不支持图片解析。请先发送 /model 并切换到支持图片的模型后，再重发图片。",
@@ -137,7 +149,7 @@ export class FeishuMessageHandler {
         return;
       }
 
-      if (downloadErrors.length && !imageInputs.length && !fileSections.length && !text.trim()) {
+      if (downloadErrors.length && !imageInputs.length && !fileSections.length && !text.trim() && !q?.text?.trim()) {
         await transport.replyText(msg.messageId, `没有可处理的内容：${downloadErrors.join("；")}`);
         await markFeishuMessage(msg.messageId, "replied");
         return;
@@ -158,12 +170,14 @@ export class FeishuMessageHandler {
       });
       await card.start();
 
+      let answered = false;
       await this.conversations.promptWithImages(
         key,
         prompt,
         imageInputs,
         async (reply) => {
           await card.completeWithAnswer(reply || "（无内容）");
+          answered = true;
           if (cfg?.mentionRequesterOnComplete && msg.chatType === "group" && msg.senderOpenId !== "unknown") {
             try {
               await transport.replyCompletionMention(msg.messageId, msg.senderOpenId);
@@ -179,7 +193,11 @@ export class FeishuMessageHandler {
         useStreaming ? (delta) => card.append(delta) : undefined,
         undefined,
         text,
+        { chatId: msg.chatId, threadId: msg.threadId, messageId: msg.messageId, createTime: msg.createTime ?? receivedAt },
       );
+      if (answered && !history.some((item) => item.notice === "unavailable")) {
+        this.bridgeStore?.markContextSeen(key, msg, receivedAt);
+      }
       await markFeishuMessage(msg.messageId, "replied");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -353,7 +371,7 @@ export class FeishuMessageHandler {
   private isDuplicateContent(msg: FeishuMessage, key: string, text: string, attachments: Array<{ kind: string; fileKey: string; fileName?: string }>) {
     const now = Date.now();
     const attachmentKey = attachments.map((a) => `${a.kind}:${a.fileKey}:${a.fileName || ""}`).join("|");
-    const contentKey = [key, msg.senderOpenId, normalizeForDedupe(text), attachmentKey].join("\u0000");
+    const contentKey = [key, msg.senderOpenId, msg.parentId || "", msg.rootId || "", normalizeForDedupe(text), attachmentKey].join("\u0000");
     const previousContentAt = this.recentContent.get(contentKey);
     if (previousContentAt && now - previousContentAt <= CONTENT_DEDUPE_TTL_MS) return true;
     this.recentContent.set(contentKey, now);
