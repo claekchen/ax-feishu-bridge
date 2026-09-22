@@ -66,9 +66,10 @@ export interface ConversationRuntime {
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
     preferredModel?: RuntimeModel,
+    currentRequest?: string,
   ): Promise<void>;
 
-  routeModel?(key: string, prompt: string, hasImages: boolean): Promise<RuntimeModel | undefined>;
+  routeModel?(key: string, prompt: string, hasImages: boolean, currentRequest?: string): Promise<RuntimeModel | undefined>;
 
   /** 供 /status 使用 */
   getStatus(key: string): ConversationStatus;
@@ -93,6 +94,8 @@ export interface ConversationRuntime {
 
   selectModel(key: string, provider: string, modelId: string, onReply: (text: string) => Promise<void>): Promise<void>;
 
+  enableAutoRouting?(key: string, onReply: (text: string) => Promise<void>): Promise<void>;
+
   selectThinkingLevel(key: string, level: string, onReply: (text: string) => Promise<void>): Promise<void>;
 
   getWorkspace(key: string): string;
@@ -101,7 +104,7 @@ export interface ConversationRuntime {
 
   getAvailableModels(): Promise<RuntimeModel[]>;
 
-  getSelectedModel(key: string): Promise<RuntimeModel | undefined>;
+  getSelectedModel(key: string, hasImages?: boolean): Promise<RuntimeModel | undefined>;
 
   resetMemory(): void;
 }

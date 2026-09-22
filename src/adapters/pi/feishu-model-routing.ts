@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { RuntimeModel } from "../../feishu/runtime.ts";
+import type { ModelSelection } from "../../feishu/types.ts";
 
 export const FLASH_MODEL = { provider: "kaon", id: "aliyunus/deepseek-v4.1-flash" };
 export const SOL_MODEL = { provider: "cliproxyapi", id: "gpt-5.6-sol" };
@@ -23,6 +24,11 @@ export function modelMatches(a: Pick<RuntimeModel, "provider" | "id"> | undefine
   return a?.provider === b.provider && a?.id === b.id;
 }
 
+export function isManualSelection(selected: ModelSelection | undefined) {
+  return Boolean(selected && (selected.routingMode === "manual"
+    || (selected.routingMode !== "auto" && !modelMatches(selected, FLASH_MODEL))));
+}
+
 export function isPriorityRequest(workspace: string, prompt: string) {
   return /(?:^|[\\/])kdh(?:[\\/]|$)/i.test(workspace)
     || /\bkdh\b/i.test(prompt)
@@ -33,7 +39,9 @@ export function modelForDifficulty(answer: unknown): typeof FLASH_MODEL | typeof
   if (!answer || typeof answer !== "object") return;
   const value = answer as { score?: unknown; confidence?: unknown };
   if (typeof value.score !== "number" || !Number.isFinite(value.score)
-    || typeof value.confidence !== "number" || value.confidence < 0.6) return;
+    || value.score < 0 || value.score > 3
+    || typeof value.confidence !== "number" || !Number.isFinite(value.confidence)
+    || value.confidence < 0.6 || value.confidence > 1) return;
   const level = value.score;
   if (level <= 0.5) return FLASH_MODEL;
   if (level >= 2.5) return ASTRA_MODEL;
@@ -41,31 +49,23 @@ export function modelForDifficulty(answer: unknown): typeof FLASH_MODEL | typeof
   return TERRA_MODEL;
 }
 
-function kaonKey(): string | undefined {
-  try {
-    const models = JSON.parse(readFileSync(join(getAgentDir(), "models.json"), "utf8"));
-    const key = models?.providers?.kaon?.apiKey;
-    if (typeof key !== "string" || !key) return;
-    if (key.startsWith("$")) return process.env[key.slice(1)];
-    return key;
-  } catch {
-    return;
-  }
-}
-
-export async function askJevDifficulty(prompt: string, history: string, fetcher: typeof fetch = fetch) {
-  const key = kaonKey();
-  if (!key) return;
+export async function askJevDifficulty(
+  input: { prompt: string; currentRequest: string; history: string; apiKey: string },
+  fetcher: typeof fetch = fetch,
+) {
   const signal = AbortSignal.timeout(8_000);
   const response = await fetcher(JEV_URL, {
     method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: JEV_MODEL,
       state: {
-        context: "Route a Feishu coding assistant turn by difficulty. Use the recent conversation only to understand the current request.",
-        recent_history: history.slice(-6000),
-        prompt: prompt.slice(0, 8000),
+        context: "Route a Feishu coding assistant turn by difficulty. Classify current_request; use request_context and recent_history only to understand it. If current_request is empty, classify the attached or quoted request_context. For follow-ups such as 'continue', preserve the difficulty of the ongoing task.",
+        current_request: input.currentRequest.length > 8000
+          ? `${input.currentRequest.slice(0, 6000)}\n[omitted]\n${input.currentRequest.slice(-2000)}`
+          : input.currentRequest,
+        recent_history: input.history.slice(-6000),
+        request_context: input.prompt.slice(-8000),
       },
       questions: {
         difficulty: {
@@ -79,5 +79,13 @@ export async function askJevDifficulty(prompt: string, history: string, fetcher:
   });
   if (!response.ok) throw new Error(`Jev returned HTTP ${response.status}`);
   const result = await response.json() as { answers?: { difficulty?: unknown } };
-  return modelForDifficulty(result.answers?.difficulty);
+  const answer = result?.answers?.difficulty;
+  const model = modelForDifficulty(answer);
+  const values = answer && typeof answer === "object" ? answer as { score?: unknown; confidence?: unknown } : {};
+  return {
+    model,
+    score: typeof values.score === "number" && Number.isFinite(values.score) ? values.score : undefined,
+    confidence: typeof values.confidence === "number" && Number.isFinite(values.confidence) ? values.confidence : undefined,
+    reason: model ? "jev" : "jev_low_confidence_or_invalid",
+  };
 }

@@ -4,7 +4,7 @@ import type { FeishuAttachment, FeishuMessage, ParsedMessageInput } from "./type
 export type BotCommand =
   | { name: "new" }
   | { name: "resume" }
-  | { name: "model" }
+  | { name: "model"; automatic?: boolean }
   | { name: "thinking" }
   | { name: "stop" }
   | { name: "workspace"; path?: string }
@@ -110,6 +110,7 @@ export function parseBotCommand(text: string): BotCommand | undefined {
   if (normalized === "/new") return { name: "new" };
   if (normalized === "/resume") return { name: "resume" };
   if (normalized === "/model") return { name: "model" };
+  if (normalized === "/model auto") return { name: "model", automatic: true };
   if (normalized === "/thinking") return { name: "thinking" };
   if (normalized === "/stop") return { name: "stop" };
   if (normalized === "/status") return { name: "status" };
@@ -138,6 +139,7 @@ export function getCommandList(): string {
     "/new — 新建会话",
     "/resume — 恢复历史会话（卡片选择）",
     "/model — 切换模型",
+    "/model auto — 恢复自动模型路由（Pi）",
     "/thinking — 调整当前会话的思考强度",
     "/workspace [path] — 切换工作区",
     "/status — 查看当前模型、思考强度、目录和状态",

@@ -19,7 +19,9 @@ import { normalizeThinkingLevels, type ThinkingStatus } from "../../feishu/think
 import type { FeishuState } from "../../feishu/types.ts";
 import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
-import { askJevDifficulty, feishuRouterEnabled, FLASH_MODEL, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
+import { createFlashFallbackExtension } from "./feishu-model-fallback.ts";
+import { createFeishuSessionSettings } from "./feishu-session-settings.ts";
+import { askJevDifficulty, feishuRouterEnabled, FLASH_MODEL, isManualSelection, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -31,6 +33,10 @@ type ActiveRun = {
   session: AgentSession;
   runId?: string;
   stopped: boolean;
+  fallbackAttempted?: boolean;
+  startedAt: number;
+  toolCalls: number;
+  usage: Record<string, { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }>;
   status?: ReplyCardSink;
   /** 当前轮流式回调（由 promptWithImages 设置） */
   onDelta?: (delta: string) => void;
@@ -38,6 +44,7 @@ type ActiveRun = {
 
 type ModelRuntimeAdapter = {
   getModel(provider: string, id: string): any;
+  getApiKey?(provider: string): Promise<string | undefined>;
   hasConfiguredAuth(model: any): boolean;
   getAvailable(): Promise<any[]>;
   sessionOptions: Record<string, unknown>;
@@ -99,17 +106,22 @@ export class PiConversationRuntime implements ConversationRuntime {
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
     preferredModel?: RuntimeModel,
+    currentRequest?: string,
   ) {
     const previous = this.previousTurn(key);
     const next = previous.then(async () => {
       debugLog("feishu.prompt.start", { key, textLength: userText.length, imageCount: images.length });
       const session = await this.ensureSessionFresh(key);
+      preferredModel ??= await this.routeModel(key, userText, images.length > 0, currentRequest ?? userText);
       if (preferredModel && !modelMatches(session.model, preferredModel)) {
         const modelRuntime = await this.getModelRuntime();
         const nextModel = modelRuntime.getModel(preferredModel.provider, preferredModel.id);
         if (nextModel && modelRuntime.hasConfiguredAuth(nextModel)) await session.setModel(nextModel);
       }
-      const run: ActiveRun = { session, runId: status?.runId, stopped: false, status, onDelta };
+      const run: ActiveRun = {
+        session, runId: status?.runId, stopped: false, status, onDelta,
+        startedAt: Date.now(), toolCalls: 0, usage: {},
+      };
       this.activeRuns.set(key, run);
       this.bridge?.beginFeishuInput(session.sessionId);
       // 流式走 session 级订阅（createSession 里）→ run.onDelta，避免漏事件
@@ -125,24 +137,15 @@ export class PiConversationRuntime implements ConversationRuntime {
         };
       }
       try {
-        let retried = false;
         try {
           await this.runPromptWithTimeouts(session, userText, images, key, onReply, status);
-          if (feishuRouterEnabled() && !run.stopped && lastAssistantFailed(session)) {
-            retried = true;
-            await this.retryOnFlash(session, key, onReply, status);
-          }
+          if (!run.stopped && lastAssistantFailed(session)) throw new Error(lastAssistantError(session));
         } catch (error) {
           if (run.stopped) {
             debugLog("feishu.prompt.stopped", { key });
             return;
           }
-          if (feishuRouterEnabled() && !retried) {
-            retried = true;
-            await this.retryOnFlash(session, key, onReply, status);
-          } else {
-            throw error;
-          }
+          throw error;
         }
       } finally {
         try { unsub?.(); } catch {}
@@ -158,6 +161,11 @@ export class PiConversationRuntime implements ConversationRuntime {
         answerLength: answer.length,
         deltaCount,
         deltaChars,
+        elapsedMs: Date.now() - run.startedAt,
+        model: session.model ? `${session.model.provider}/${session.model.id}` : undefined,
+        fallbackAttempted: run.fallbackAttempted === true,
+        toolCalls: run.toolCalls,
+        usage: run.usage,
       });
       await onReply(answer || "No response.");
       // onReply（ReplyCard.completeWithAnswer）已切到 done；此处仅兜底
@@ -357,7 +365,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       const existing = this.state.models?.[key];
-      this.state.models![key] = { provider, id: modelId, thinkingLevel: existing?.thinkingLevel };
+      this.state.models![key] = { provider, id: modelId, thinkingLevel: existing?.thinkingLevel, routingMode: "manual" };
       writeJson(STATE_PATH, this.state);
 
       const cached = this.sessions.get(key);
@@ -366,7 +374,25 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
       this.sessions.delete(key);
       this.sessionFileStats.delete(key);
-      await onReply(`已切换到 ${provider}/${modelId}。当前飞书会话后续都会使用这个模型。`);
+      await onReply(feishuRouterEnabled()
+        ? `已切换到 ${provider}/${modelId}。当前飞书会话后续优先使用这个模型；KDH/Codex review 固定规则和图片能力要求仍生效。发送 /model auto 可恢复自动路由。`
+        : `已切换到 ${provider}/${modelId}。当前飞书会话后续都会使用这个模型。`);
+    }).catch(async (error) => {
+      await onReply(`Pi error: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    this.queues.set(key, next);
+    await next;
+  }
+
+  async enableAutoRouting(key: string, onReply: (text: string) => Promise<void>) {
+    if (!feishuRouterEnabled()) {
+      await onReply("当前机器人尚未启用自动模型路由。");
+      return;
+    }
+    const next = this.previousTurn(key).then(async () => {
+      this.state.models![key] = { ...(this.state.models?.[key] || FLASH_MODEL), routingMode: "auto" };
+      writeJson(STATE_PATH, this.state);
+      await onReply("已恢复自动模型路由，下一条请求会根据任务难度选择模型。");
     }).catch(async (error) => {
       await onReply(`Pi error: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -459,58 +485,88 @@ export class PiConversationRuntime implements ConversationRuntime {
       });
   }
 
-  async getSelectedModel(key: string): Promise<RuntimeModel | undefined> {
-    const native = await this.getSelectedNativeModel(key);
+  async getSelectedModel(key: string, hasImages = false): Promise<RuntimeModel | undefined> {
+    const automatic = feishuRouterEnabled() && !isManualSelection(this.state.models?.[key]);
+    const cached = automatic ? this.sessions.get(key) : undefined;
+    const native = (cached ? (await cached).model : undefined) ?? await this.getSelectedNativeModel(key);
+    if (hasImages && feishuRouterEnabled() && !toRuntimeModel(native).supportsImage) {
+      const modelRuntime = await this.getModelRuntime();
+      const sol = modelRuntime.getModel(SOL_MODEL.provider, SOL_MODEL.id);
+      if (sol && modelRuntime.hasConfiguredAuth(sol) && toRuntimeModel(sol).supportsImage) return toRuntimeModel(sol);
+      const visionModel = (await modelRuntime.getAvailable()).find((model) => toRuntimeModel(model).supportsImage);
+      if (visionModel) return toRuntimeModel(visionModel);
+      // Extensions can register providers only after the first session is loaded.
+      const session = await this.getSession(key);
+      const loadedSol = modelRuntime.getModel(SOL_MODEL.provider, SOL_MODEL.id);
+      if (loadedSol && modelRuntime.hasConfiguredAuth(loadedSol) && toRuntimeModel(loadedSol).supportsImage) return toRuntimeModel(loadedSol);
+      if (session.model && toRuntimeModel(session.model).supportsImage) return toRuntimeModel(session.model);
+      const loadedVisionModel = (await modelRuntime.getAvailable()).find((model) => toRuntimeModel(model).supportsImage);
+      if (loadedVisionModel) return toRuntimeModel(loadedVisionModel);
+    }
     return native ? toRuntimeModel(native) : undefined;
   }
 
-  async routeModel(key: string, prompt: string, hasImages = false): Promise<RuntimeModel | undefined> {
+  async routeModel(key: string, prompt: string, hasImages = false, currentRequest = prompt): Promise<RuntimeModel | undefined> {
     if (!feishuRouterEnabled()) return this.getSelectedModel(key);
-    const session = await this.ensureSessionFresh(key);
+    const started = Date.now();
     const modelRuntime = await this.getModelRuntime();
-    const priority = isPriorityRequest(this.getWorkspace(key), prompt) || hasImages;
+    const priority = isPriorityRequest(this.getWorkspace(key), currentRequest);
     const selected = this.state.models?.[key];
     let target: Pick<RuntimeModel, "provider" | "id"> | undefined;
+    let reason = "jev_unavailable";
+    let score: number | undefined;
+    let confidence: number | undefined;
     if (priority) {
       target = SOL_MODEL;
-    } else if (selected && !modelMatches(selected, FLASH_MODEL)) {
-      return this.getSelectedModel(key);
+      reason = "priority";
+    } else if (isManualSelection(selected)) {
+      const manual = selected && modelRuntime.getModel(selected.provider, selected.id);
+      if (manual && modelRuntime.hasConfiguredAuth(manual) && (!hasImages || toRuntimeModel(manual).supportsImage)) {
+        target = selected;
+        reason = "manual";
+      } else if (hasImages) {
+        target = SOL_MODEL;
+        reason = "image_capability";
+      }
+    } else if (hasImages) {
+      target = SOL_MODEL;
+      reason = "image_capability";
     } else {
       try {
-        const history = (session.messages || []).slice(-8).map((msg: any) => {
+        const session = await this.getSession(key);
+        const history = (session.messages || []).filter((msg: any) => msg.role === "user" || msg.role === "assistant")
+          .slice(-8).map((msg: any) => {
           const content = Array.isArray(msg.content)
             ? msg.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ")
             : typeof msg.content === "string" ? msg.content : "";
           return `${msg.role}: ${content.slice(0, 1000)}`;
         }).join("\n");
-        target = await askJevDifficulty(prompt, history);
+        const apiKey = await modelRuntime.getApiKey?.("kaon");
+        if (apiKey) {
+          const decision = await askJevDifficulty({ prompt, currentRequest, history, apiKey });
+          target = decision.model;
+          score = decision.score;
+          confidence = decision.confidence;
+          reason = decision.reason;
+        } else {
+          reason = "jev_missing_auth";
+        }
       } catch (error) {
+        reason = "jev_error";
         debugLog("feishu.router.jev_error", { key, error: error instanceof Error ? error.message : String(error) });
       }
     }
     if (target) {
       const model = modelRuntime.getModel(target.provider, target.id);
       if (model && modelRuntime.hasConfiguredAuth(model) && (!hasImages || toRuntimeModel(model).supportsImage)) {
-        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority });
+        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, score, confidence, latencyMs: Date.now() - started });
         return toRuntimeModel(model);
       }
+      reason = "target_unavailable";
     }
-    return this.getSelectedModel(key);
-  }
-
-  private async retryOnFlash(session: AgentSession, key: string, onReply: (text: string) => Promise<void>, status?: ReplyCardSink) {
-    const modelRuntime = await this.getModelRuntime();
-    const fallback = modelRuntime.getModel(FLASH_MODEL.provider, FLASH_MODEL.id);
-    if (!fallback || !modelRuntime.hasConfiguredAuth(fallback)) throw new Error("DeepSeek 4.1 Flash fallback is unavailable");
-    const from = session.model ? `${session.model.provider}/${session.model.id}` : "unknown";
-    if (!modelMatches(session.model, FLASH_MODEL)) await session.setModel(fallback);
-    debugLog("feishu.router.retry", { key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}` });
-    await this.runPromptWithTimeouts(
-      session,
-      "The previous model failed. Continue the user's last request from the existing conversation context. Do not repeat completed tool actions.",
-      [], key, onReply, status,
-    );
-    if (lastAssistantFailed(session)) throw new Error("DeepSeek 4.1 Flash retry failed");
+    const fallback = await this.getSelectedModel(key, hasImages);
+    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, score, confidence, latencyMs: Date.now() - started });
+    return fallback;
   }
 
   /** 内部使用的原生 Pi 模型（不跨出本适配器）。 */
@@ -698,9 +754,19 @@ export class PiConversationRuntime implements ConversationRuntime {
       ? SessionManager.open(existingFile, undefined, workspaceCwd)
       : SessionManager.create(workspaceCwd);
 
+    const settingsManager = createFeishuSessionSettings(workspaceCwd, getAgentDir(), feishuRouterEnabled());
+
     const loader = new DefaultResourceLoader({
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
+      settingsManager,
+      extensionFactories: feishuRouterEnabled() ? [createFlashFallbackExtension({
+        settings: settingsManager,
+        getRun: () => this.activeRuns.get(key),
+        onFallback: (from, error) => debugLog("feishu.router.retry", {
+          key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}`, error,
+        }),
+      })] : [],
       extensionsOverride: (base) => ({
         ...base,
         extensions: feishuRouterEnabled()
@@ -728,15 +794,26 @@ export class PiConversationRuntime implements ConversationRuntime {
       ...modelRuntime.sessionOptions,
       model,
       sessionManager,
+      settingsManager,
       resourceLoader: loader,
     } as any);
 
     await session.bindExtensions({});
-    if (feishuRouterEnabled()) session.setAutoRetryEnabled(false);
     this.bridge?.attachSession(key, session.sessionId);
     // 会话级长期订阅：保证 text_delta 在 prompt 期间一定能收到
     session.subscribe((event: any) => {
       const run = this.activeRuns.get(key);
+      if (run && event.type === "tool_execution_start") run.toolCalls += 1;
+      if (run && event.type === "message_end" && event.message?.role === "assistant") {
+        const message = event.message;
+        const modelKey = `${message.provider}/${message.model}`;
+        const totals = run.usage[modelKey] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        totals.calls += 1;
+        for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+          const value = message.usage?.[field];
+          if (typeof value === "number" && Number.isFinite(value)) totals[field] += value;
+        }
+      }
       run?.status?.updateFromEvent(event);
       const delta = extractAssistantTextDelta(event);
       if (delta && run && !run.stopped) {
@@ -818,6 +895,7 @@ async function createModelRuntimeAdapter(): Promise<ModelRuntimeAdapter> {
     const runtime = await sdk.ModelRuntime.create();
     return {
       getModel: (provider, id) => runtime.getModel(provider, id),
+      getApiKey: async (provider) => (await runtime.getAuth(provider))?.auth?.apiKey,
       hasConfiguredAuth: (model) => runtime.hasConfiguredAuth(model.provider),
       getAvailable: async () => [...await runtime.getAvailable()],
       sessionOptions: { modelRuntime: runtime },
@@ -829,6 +907,7 @@ async function createModelRuntimeAdapter(): Promise<ModelRuntimeAdapter> {
     const modelRegistry = sdk.ModelRegistry.create(authStorage);
     return {
       getModel: (provider, id) => modelRegistry.find(provider, id),
+      getApiKey: async (provider) => modelRegistry.getApiKeyForProvider(provider),
       hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
       getAvailable: async () => [...await modelRegistry.getAvailable()],
       sessionOptions: { authStorage, modelRegistry },
@@ -891,6 +970,11 @@ function extractLastAssistantText(session: AgentSession): string {
 function lastAssistantFailed(session: AgentSession): boolean {
   const message = [...(session.messages || [])].reverse().find((item: any) => item.role === "assistant") as any;
   return message?.stopReason === "error";
+}
+
+function lastAssistantError(session: AgentSession): string {
+  const message = [...(session.messages || [])].reverse().find((item: any) => item.role === "assistant") as any;
+  return message?.errorMessage || "Model request failed";
 }
 
 /** 把 Pi 原生模型对象转换成平台无关的 RuntimeModel（禁止原生对象泄漏到飞书层）。 */
