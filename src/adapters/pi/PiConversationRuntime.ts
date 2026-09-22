@@ -21,7 +21,9 @@ import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeMode
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
 import { createFlashFallbackExtension } from "./feishu-model-fallback.ts";
 import { createFeishuSessionSettings } from "./feishu-session-settings.ts";
-import { askJevDifficulty, feishuRouterEnabled, FLASH_MODEL, isManualSelection, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
+import { feishuRouterEnabled, FLASH_MODEL, isManualSelection, isPriorityRequest, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
+import { JevDecisionClient } from "./feishu-jev-client.ts";
+import { ContinuationRouting } from "./feishu-continuation-routing.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -57,6 +59,9 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly sessionFileStats = new Map<string, { mtimeMs: number; size: number }>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly jevClient = new JevDecisionClient();
+  private readonly continuationRouting = new ContinuationRouting();
+  private routingGeneration = 0;
   private modelRuntimePromise: Promise<ModelRuntimeAdapter> | undefined;
   private defaultProvider: string | undefined;
   private defaultModelId: string | undefined;
@@ -109,10 +114,13 @@ export class PiConversationRuntime implements ConversationRuntime {
     currentRequest?: string,
   ) {
     const previous = this.previousTurn(key);
+    let routingGeneration = this.routingGeneration;
     const next = previous.then(async () => {
       debugLog("feishu.prompt.start", { key, textLength: userText.length, imageCount: images.length });
+      routingGeneration = this.routingGeneration;
       const session = await this.ensureSessionFresh(key);
       preferredModel ??= await this.routeModel(key, userText, images.length > 0, currentRequest ?? userText);
+      if (routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
       if (preferredModel && !modelMatches(session.model, preferredModel)) {
         const modelRuntime = await this.getModelRuntime();
         const nextModel = modelRuntime.getModel(preferredModel.provider, preferredModel.id);
@@ -128,6 +136,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       let unsub: (() => void) | undefined;
       let deltaCount = 0;
       let deltaChars = 0;
+      const previousAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (onDelta) {
         const userOnDelta = onDelta;
         run.onDelta = (delta: string) => {
@@ -148,6 +157,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           throw error;
         }
       } finally {
+        if (run.stopped && routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
         try { unsub?.(); } catch {}
         run.onDelta = undefined;
         if (this.activeRuns.get(key) === run) this.activeRuns.delete(key);
@@ -155,6 +165,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         this.recordSessionFileStat(key, session.sessionFile);
       }
       if (run.stopped) return;
+      const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       const answer = extractLastAssistantText(session);
       debugLog("feishu.prompt.done", {
         key,
@@ -170,7 +181,19 @@ export class PiConversationRuntime implements ConversationRuntime {
       await onReply(answer || "No response.");
       // onReply（ReplyCard.completeWithAnswer）已切到 done；此处仅兜底
       await status?.finish("done");
+      if (routingGeneration !== this.routingGeneration) return;
+      if (feishuRouterEnabled() && session.model && lastAssistant?.role === "assistant"
+        && lastAssistant !== previousAssistant && lastAssistant.stopReason === "stop") {
+        this.continuationRouting.record(key, {
+          sessionId: session.sessionId,
+          workspace: this.getWorkspace(key),
+          model: { provider: lastAssistant.provider, id: lastAssistant.model },
+        });
+      } else {
+        this.continuationRouting.clear(key);
+      }
     }).catch(async (error) => {
+      if (routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
       const message = error instanceof Error ? error.message : String(error);
       debugLog("feishu.prompt.error", { key, error: message });
       // 错误也写进同一张卡；onReply 若已是 completeWithAnswer 会 no-op（status 非 running）
@@ -263,6 +286,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       delete this.state.sessions[key];
       writeJson(STATE_PATH, this.state);
@@ -323,6 +347,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       const currentPath = this.normalizeSessionPath(this.state.sessions[key]);
+      this.continuationRouting.clear(key);
       if (currentPath === sessionPath) {
         this.state.workspaces![key] = sessionInfo.cwd || this.getWorkspace(key);
         writeJson(STATE_PATH, this.state);
@@ -337,6 +362,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       this.state.sessions[key] = sessionPath;
       this.state.workspaces![key] = sessionInfo.cwd || this.cwd;
@@ -373,6 +399,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       await onReply(feishuRouterEnabled()
         ? `已切换到 ${provider}/${modelId}。当前飞书会话后续优先使用这个模型；KDH/Codex review 固定规则和图片能力要求仍生效。发送 /model auto 可恢复自动路由。`
@@ -390,6 +417,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       return;
     }
     const next = this.previousTurn(key).then(async () => {
+      this.continuationRouting.clear(key);
       this.state.models![key] = { ...(this.state.models?.[key] || FLASH_MODEL), routingMode: "auto" };
       writeJson(STATE_PATH, this.state);
       await onReply("已恢复自动模型路由，下一条请求会根据任务难度选择模型。");
@@ -461,6 +489,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       delete this.state.sessions[key];
       this.state.workspaces![key] = workspace;
@@ -516,6 +545,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     let reason = "jev_unavailable";
     let score: number | undefined;
     let confidence: number | undefined;
+    let retryAfterMs: number | undefined;
     if (priority) {
       target = SOL_MODEL;
       reason = "priority";
@@ -534,6 +564,20 @@ export class PiConversationRuntime implements ConversationRuntime {
     } else {
       try {
         const session = await this.getSession(key);
+        // Enriched prompts may introduce a new task through quotes, files, or group context.
+        const continuation = prompt.trim() === currentRequest.trim()
+          ? this.continuationRouting.get(key, {
+            sessionId: session.sessionId, workspace: this.getWorkspace(key), currentRequest,
+          })
+          : undefined;
+        const retainedModel = continuation && modelRuntime.getModel(continuation.provider, continuation.id);
+        if (retainedModel && modelRuntime.hasConfiguredAuth(retainedModel)) {
+          debugLog("feishu.router.selected", {
+            key, model: `${retainedModel.provider}/${retainedModel.id}`, priority,
+            reason: "continuation", latencyMs: Date.now() - started,
+          });
+          return toRuntimeModel(retainedModel);
+        }
         const history = (session.messages || []).filter((msg: any) => msg.role === "user" || msg.role === "assistant")
           .slice(-8).map((msg: any) => {
           const content = Array.isArray(msg.content)
@@ -543,11 +587,13 @@ export class PiConversationRuntime implements ConversationRuntime {
         }).join("\n");
         const apiKey = await modelRuntime.getApiKey?.("kaon");
         if (apiKey) {
-          const decision = await askJevDifficulty({ prompt, currentRequest, history, apiKey });
+          const decision = await this.jevClient.decide({ prompt, currentRequest, history, apiKey });
           target = decision.model;
           score = decision.score;
           confidence = decision.confidence;
           reason = decision.reason;
+          retryAfterMs = decision.retryAfterMs;
+          if (decision.error) debugLog("feishu.router.jev_error", { key, error: decision.error, retryAfterMs });
         } else {
           reason = "jev_missing_auth";
         }
@@ -559,13 +605,13 @@ export class PiConversationRuntime implements ConversationRuntime {
     if (target) {
       const model = modelRuntime.getModel(target.provider, target.id);
       if (model && modelRuntime.hasConfiguredAuth(model) && (!hasImages || toRuntimeModel(model).supportsImage)) {
-        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, score, confidence, latencyMs: Date.now() - started });
+        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, score, confidence, retryAfterMs, latencyMs: Date.now() - started });
         return toRuntimeModel(model);
       }
       reason = "target_unavailable";
     }
     const fallback = await this.getSelectedModel(key, hasImages);
-    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, score, confidence, latencyMs: Date.now() - started });
+    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, score, confidence, retryAfterMs, latencyMs: Date.now() - started });
     return fallback;
   }
 
@@ -599,12 +645,14 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   resetMemory() {
+    this.routingGeneration += 1;
     for (const session of this.sessions.values()) {
       void session.then((s) => s.dispose()).catch(() => undefined);
     }
     this.sessions.clear();
     this.sessionFileStats.clear();
     this.queues.clear();
+    this.continuationRouting.reset();
     this.state = { sessions: {}, models: {}, workspaces: {} };
   }
 
@@ -652,6 +700,7 @@ export class PiConversationRuntime implements ConversationRuntime {
             oldSession.dispose();
           } catch {}
           this.sessions.delete(key);
+          this.continuationRouting.clear(key);
           const refreshed = this.createSession(key);
           this.sessions.set(key, refreshed);
           return refreshed;

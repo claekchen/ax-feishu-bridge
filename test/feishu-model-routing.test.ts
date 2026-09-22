@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getRuntimeSource, setRuntimeSource } from "../src/feishu/config.ts";
 import { buildPromptWithQuote, buildPromptWithRecentMessages, parseBotCommand } from "../src/feishu/messages.ts";
+import { ContinuationRouting } from "../src/adapters/pi/feishu-continuation-routing.ts";
+import { JevDecisionClient } from "../src/adapters/pi/feishu-jev-client.ts";
 
 test("priority routing recognizes KDH workspaces and Codex review requests", () => {
   assert.equal(isPriorityRequest("/srv/work/kdh/repo", "hello"), true);
@@ -42,6 +44,9 @@ async function withRuntime(run: (runtime: any) => Promise<void>) {
       sessionFileStats: new Map(),
       queues: new Map(),
       activeRuns: new Map(),
+      continuationRouting: new ContinuationRouting(),
+      jevClient: new JevDecisionClient(),
+      routingGeneration: 0,
       timeouts: {},
     });
     await run(runtime);
@@ -209,5 +214,109 @@ test("the first image loads extension-provided vision models without refreshing 
     assert.equal(loaded, true);
     assert.equal(selected.id, SOL_MODEL.id);
     assert.equal(selected.supportsImage, true);
+  });
+});
+
+function installRoutingSession(runtime: any) {
+  const session: any = {
+    sessionId: "routing-session", model: { ...FLASH_MODEL, input: ["text"] }, messages: [],
+    setModel: async (model: any) => { session.model = model; },
+    dispose: () => {},
+  };
+  runtime.sessions.set("test", Promise.resolve(session));
+  runtime.getSession = async () => session;
+  runtime.ensureSessionFresh = async () => session;
+  runtime.getModelRuntime = async () => ({
+    getApiKey: async () => "test-only",
+    getModel: (provider: string, id: string) => ({ provider, id, input: ["text", "image"] }),
+    hasConfiguredAuth: () => true,
+  });
+  return session;
+}
+
+function completedAssistant(model = ASTRA_MODEL) {
+  return { role: "assistant", provider: model.provider, model: model.id, stopReason: "stop", content: [{ type: "text", text: "Done" }] };
+}
+
+test("a bare continuation keeps the actual successful fallback model without consulting Jev", async () => {
+  await withRuntime(async (runtime) => {
+    const session = installRoutingSession(runtime);
+    let decisions = 0;
+    runtime.jevClient = { decide: async () => {
+      decisions += 1;
+      return { model: ASTRA_MODEL, score: 3, confidence: 1, reason: "jev" };
+    } };
+    runtime.runPromptWithTimeouts = async () => {
+      session.model = { ...FLASH_MODEL, input: ["text"] };
+      session.messages.push(completedAssistant(FLASH_MODEL));
+    };
+    await runtime.promptWithImages("test", "Analyze a difficult concurrency bug", [], async () => {});
+    assert.equal((await runtime.routeModel("test", "继续")).id, FLASH_MODEL.id);
+    assert.equal(decisions, 1);
+    assert.equal((await runtime.routeModel("test", "codex review")).id, SOL_MODEL.id);
+    assert.equal(decisions, 1);
+  });
+});
+
+test("new requirements and enriched continuation prompts are evaluated by Jev", async () => {
+  await withRuntime(async (runtime) => {
+    const session = installRoutingSession(runtime);
+    runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: ASTRA_MODEL });
+    let decisions = 0;
+    runtime.jevClient = { decide: async () => {
+      decisions += 1;
+      return { model: TERRA_MODEL, score: 1, confidence: 1, reason: "jev" };
+    } };
+    assert.equal((await runtime.routeModel("test", "继续")).id, ASTRA_MODEL.id);
+    assert.equal(decisions, 0);
+    for (const [prompt, currentRequest] of [
+      ["继续，并检查并发锁", "继续，并检查并发锁"],
+      [buildPromptWithQuote("继续", { msgType: "text", text: "A new task" }), "继续"],
+      [buildPromptWithRecentMessages("继续", [{ sender: "someone", text: "Another task" }]), "继续"],
+      ["继续\n\nATTACHED_FILE", "继续"],
+    ]) {
+      assert.equal((await runtime.routeModel("test", prompt, false, currentRequest)).id, TERRA_MODEL.id);
+    }
+    assert.equal(decisions, 4);
+  });
+});
+
+test("failed, aborted, stopped, intercepted, and reset turns cannot reuse an older success", async () => {
+  for (const mode of ["error", "aborted", "stopped", "intercepted", "reset"]) {
+    await withRuntime(async (runtime) => {
+      const session = installRoutingSession(runtime);
+      session.messages.push(completedAssistant());
+      runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: ASTRA_MODEL });
+      runtime.jevClient = { decide: async () => ({ model: SOL_MODEL, score: 2, confidence: 1, reason: "jev" }) };
+      runtime.runPromptWithTimeouts = async () => {
+        if (mode === "error") throw new Error("Test provider failure");
+        if (mode === "aborted") session.messages.push({ ...completedAssistant(), stopReason: "aborted" });
+        if (mode === "stopped") runtime.activeRuns.get("test").stopped = true;
+        if (mode === "reset") {
+          runtime.resetMemory();
+          session.messages.push(completedAssistant(SOL_MODEL));
+        }
+      };
+      await runtime.promptWithImages("test", "Start a different task", [], async () => {});
+      assert.equal(runtime.continuationRouting.get("test", {
+        sessionId: session.sessionId, workspace: runtime.cwd, currentRequest: "continue",
+      }), undefined, mode);
+    });
+  }
+});
+
+test("Jev cooldown retains the active model and fixed rules bypass the outage", async () => {
+  await withRuntime(async (runtime) => {
+    const session = installRoutingSession(runtime);
+    session.model = { ...ASTRA_MODEL, input: ["text"] };
+    let calls = 0;
+    runtime.jevClient = new JevDecisionClient({
+      now: () => 1000,
+      ask: async () => { calls += 1; throw new Error("Test upstream unavailable"); },
+    });
+    for (let i = 0; i < 4; i++) assert.equal((await runtime.routeModel("test", "A new task")).id, ASTRA_MODEL.id);
+    assert.equal(calls, 2);
+    assert.equal((await runtime.routeModel("test", "kdh task")).id, SOL_MODEL.id);
+    assert.equal(calls, 2);
   });
 });
