@@ -232,7 +232,7 @@ export class FeishuMessageHandler {
         }
         return true;
       }
-      const models = await this.conversations.getAvailableModels();
+      const models = await this.conversations.getAvailableModels(key);
       if (!models.length) {
         await transport.replyText(msg.messageId, "当前没有可用模型。请先在 Pi 里完成模型登录或 API Key 配置。");
         return true;

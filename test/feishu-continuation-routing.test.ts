@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ContinuationRouting } from "../src/adapters/pi/feishu-continuation-routing.ts";
 
-const model = { provider: "cliproxyapi", id: "gpt-6-astra" };
+const model = { provider: "cliproxyapi", id: "gpt-6-luna" };
 const turn = { sessionId: "session-a", workspace: "/workspace/project", model };
 const request = { sessionId: turn.sessionId, workspace: turn.workspace, currentRequest: "继续" };
 

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createFlashFallbackExtension, type FallbackRun } from "../src/adapters/pi/feishu-model-fallback.ts";
-import { FLASH_MODEL, SOL_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { FLASH_MODEL, LUNA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 
 // Set the global SDK directory before importing Pi so tests never read real credentials or extensions.
 const testDir = mkdtempSync(join(tmpdir(), "feishu-native-fallback-"));
@@ -47,7 +47,7 @@ async function withSession(
   const events: any[] = [];
   const run: FallbackRun = { stopped: options.stopped ?? false };
   let toolExecutions = 0;
-  for (const target of [SOL_MODEL, FLASH_MODEL]) {
+  for (const target of [LUNA_MODEL, FLASH_MODEL]) {
     runtime.registerProvider(target.provider, {
       api: "feishu-native-fallback-test",
       apiKey: "isolated-test-key",
@@ -130,7 +130,7 @@ async function withSession(
     agentDir: cwd,
     settingsManager: settings,
     modelRuntime: runtime,
-    model: runtime.getModel(SOL_MODEL.provider, SOL_MODEL.id),
+    model: runtime.getModel(LUNA_MODEL.provider, LUNA_MODEL.id),
     sessionManager: SessionManager.inMemory(cwd),
     resourceLoader: loader,
     tools: ["record_action"],
@@ -163,7 +163,7 @@ test("native fallback resumes after a completed tool without replaying the user 
   }, async ({ session, requests, fallbacks, events, toolExecutions, settings }) => {
     await session.prompt("Perform exactly one action and report the result.");
     assert.deepEqual(requests.map((request: Request) => request.model), [
-      "cliproxyapi/gpt-6-sol", "cliproxyapi/gpt-6-sol", "kaon/aliyunus/deepseek-v4.1-flash",
+      "cliproxyapi/gpt-6-luna", "cliproxyapi/gpt-6-luna", "kaon/aliyunus/deepseek-v4.1-flash",
     ]);
     assert.equal(toolExecutions(), 1);
     assert.equal(fallbacks.length, 1);
@@ -182,7 +182,7 @@ test("native fallback resumes after a completed tool without replaying the user 
 test("a failed Flash fallback is bounded to one attempt even for retryable errors", { timeout: 15000 }, async () => {
   await withSession(() => ({ stopReason: "error", errorMessage: "503 service unavailable" }), async ({ session, requests, fallbacks, events }) => {
     await session.prompt("Answer once.");
-    assert.deepEqual(requests.map((request: Request) => request.model), ["cliproxyapi/gpt-6-sol", "kaon/aliyunus/deepseek-v4.1-flash"]);
+    assert.deepEqual(requests.map((request: Request) => request.model), ["cliproxyapi/gpt-6-luna", "kaon/aliyunus/deepseek-v4.1-flash"]);
     assert.equal(fallbacks.length, 1);
     assert.equal(events.filter((event: any) => event.type === "auto_retry_start").length, 1);
     assert.equal(session.messages.at(-1).stopReason, "error");

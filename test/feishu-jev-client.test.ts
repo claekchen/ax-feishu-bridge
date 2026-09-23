@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JevDecisionClient } from "../src/adapters/pi/feishu-jev-client.ts";
-import { SOL_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { LUNA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 
 const input = { prompt: "test", currentRequest: "test", history: "", apiKey: "test-only" };
-const success = { model: SOL_MODEL, score: 1, confidence: 0.9, reason: "jev" };
+const success = { model: LUNA_MODEL, score: 1, confidence: 0.9, reason: "jev" };
 const uncertain = { model: undefined, score: 1, confidence: 0.2, reason: "jev_low_confidence_or_invalid" };
 
 function deferred<T>() {

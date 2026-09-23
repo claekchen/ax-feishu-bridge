@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askJevDifficulty, isManualSelection, isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, LUNA_MODEL, SOL_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { askJevDifficulty, isAllowedRoutingModel, isManualSelection, isPriorityRequest, modelForDifficulty, FLASH_MODEL, LUNA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 import { PiConversationRuntime } from "../src/adapters/pi/PiConversationRuntime.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { getRuntimeSource, setRuntimeSource } from "../src/feishu/config.ts";
 import { buildPromptWithQuote, buildPromptWithRecentMessages, parseBotCommand } from "../src/feishu/messages.ts";
 import { ContinuationRouting } from "../src/adapters/pi/feishu-continuation-routing.ts";
-import { JevDecisionClient } from "../src/adapters/pi/feishu-jev-client.ts";
+
+const retiredSolModel = { provider: "cliproxyapi", id: "gpt-6-sol" };
+const retiredAstraModel = { provider: "cliproxyapi", id: "gpt-6-astra" };
 
 test("priority routing recognizes KDH workspaces and Codex review requests", () => {
   assert.equal(isPriorityRequest("/srv/work/kdh/repo", "hello"), true);
@@ -17,15 +19,20 @@ test("priority routing recognizes KDH workspaces and Codex review requests", () 
   assert.equal(isPriorityRequest("/srv/work/other", "简单问候"), false);
 });
 
-test("Jev difficulty maps to four model tiers conservatively", () => {
+test("Jev difficulty stays on the sole primary model while provider fallback remains separate", () => {
   assert.deepEqual(modelForDifficulty({ score: 0, confidence: 0.95 }), LUNA_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 0.5, confidence: 0.6 }), { provider: "cliproxyapi", id: "gpt-6-luna" });
-  assert.deepEqual(modelForDifficulty({ score: 0.51, confidence: 0.95 }), SOL_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), SOL_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 1.5, confidence: 0.95 }), { provider: "cliproxyapi", id: "gpt-6-sol" });
-  assert.deepEqual(modelForDifficulty({ score: 1.99, confidence: 0.99 }), SOL_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 2.5, confidence: 0.95 }), ASTRA_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 3, confidence: 1 }), ASTRA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 0.5, confidence: 0.6 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 0.51, confidence: 0.95 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1.5, confidence: 0.95 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1.99, confidence: 0.99 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 2.5, confidence: 0.95 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 3, confidence: 1 }), LUNA_MODEL);
+  assert.equal(isAllowedRoutingModel(LUNA_MODEL), true);
+  assert.equal(isAllowedRoutingModel(FLASH_MODEL), true);
+  assert.equal(isAllowedRoutingModel(retiredSolModel), false);
+  assert.equal(isAllowedRoutingModel(retiredAstraModel), false);
+  assert.equal(isAllowedRoutingModel(undefined), false);
   assert.equal(modelForDifficulty({ score: 3, confidence: 0.3 }), undefined);
   assert.equal(modelForDifficulty({ confidence: 1 }), undefined);
 });
@@ -49,7 +56,6 @@ async function withRuntime(run: (runtime: any) => Promise<void>) {
       queues: new Map(),
       activeRuns: new Map(),
       continuationRouting: new ContinuationRouting(),
-      jevClient: new JevDecisionClient(),
       routingGeneration: 0,
       timeouts: {},
     });
@@ -69,9 +75,9 @@ test("a second turn routes only after the preceding turn has finished", async ()
     let firstStarted!: () => void;
     const waitForFirstStart = new Promise<void>((resolve) => { firstStarted = resolve; });
     const waitForRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const session: any = { sessionId: "test-session", model: SOL_MODEL, messages: [] };
+    const session: any = { sessionId: "test-session", model: LUNA_MODEL, messages: [] };
     runtime.ensureSessionFresh = async () => { calls.push("refresh"); return session; };
-    runtime.routeModel = async (_key: string, prompt: string) => { calls.push(`route:${prompt}`); return SOL_MODEL; };
+    runtime.routeModel = async (_key: string, prompt: string) => { calls.push(`route:${prompt}`); return LUNA_MODEL; };
     runtime.runPromptWithTimeouts = async (_session: any, prompt: string) => {
       calls.push(`start:${prompt}`);
       if (prompt === "first") {
@@ -101,12 +107,13 @@ test("Jev rejects invalid scores and confidence instead of choosing an extreme t
   }
 });
 
-test("explicit Flash selection is manual while legacy Flash defaults remain automatic", () => {
+test("manual selections are restricted to the two budget-approved models", () => {
   assert.deepEqual(FLASH_MODEL, { provider: "kaon", id: "aliyunus/deepseek-v4.1-flash" });
   assert.equal(isManualSelection(FLASH_MODEL), false);
   assert.equal(isManualSelection({ ...FLASH_MODEL, routingMode: "manual" }), true);
-  assert.equal(isManualSelection(SOL_MODEL), true);
-  assert.equal(isManualSelection({ ...SOL_MODEL, routingMode: "auto" }), false);
+  assert.equal(isManualSelection(retiredSolModel), false);
+  assert.equal(isManualSelection({ ...retiredSolModel, routingMode: "manual" }), false);
+  assert.equal(isManualSelection({ ...retiredSolModel, routingMode: "auto" }), false);
   assert.equal(isManualSelection(LUNA_MODEL), true);
   assert.equal(isManualSelection({ ...LUNA_MODEL, routingMode: "auto" }), false);
 });
@@ -123,7 +130,7 @@ test("Jev keeps the current request and file content when quoted context is long
     return new Response(JSON.stringify({ answers: { difficulty: { score: 3, confidence: 0.9 } } }));
   }) as typeof fetch;
   const decision = await askJevDifficulty({ prompt, currentRequest, history: "Prior task", apiKey: "test-only" }, fetcher);
-  assert.deepEqual(decision.model, ASTRA_MODEL);
+  assert.deepEqual(decision.model, LUNA_MODEL);
   assert.equal(body.state.current_request, currentRequest);
   assert.equal(body.state.request_context.includes("ATTACHED_CODE_MARKER"), true);
   assert.ok(body.state.request_context.length <= 8000);
@@ -138,50 +145,36 @@ test("routing uses current user text for fixed rules and ignores unrelated group
     });
     const prompt = buildPromptWithRecentMessages("hello", [{ sender: "someone", text: "kdh codex review" }]);
     assert.equal((await runtime.routeModel("test", prompt, false, "hello")).id, FLASH_MODEL.id);
-    assert.equal((await runtime.routeModel("test", prompt, false, "codex review this PR")).id, SOL_MODEL.id);
+    assert.equal((await runtime.routeModel("test", prompt, false, "codex review this PR")).id, LUNA_MODEL.id);
   });
 });
 
-test("routing never hot reloads an active session and retains user history across tool results", async () => {
+test("budget routing skips Jev and selects Luna for every difficulty", async () => {
   await withRuntime(async (runtime) => {
-    let body: any;
-    const previousFetch = globalThis.fetch;
-    globalThis.fetch = (async (_url: any, options: any) => {
-      body = JSON.parse(options.body);
-      return new Response(JSON.stringify({ answers: { difficulty: { score: 2, confidence: 0.9 } } }));
-    }) as typeof fetch;
-    try {
-      runtime.ensureSessionFresh = async () => { throw new Error("An active session must not be refreshed by routing"); };
-      runtime.getSession = async () => ({ messages: [
-        { role: "user", content: "CURRENT_TASK_CONTEXT" },
-        ...Array.from({ length: 10 }, () => ({ role: "toolResult", content: "verbose tool output" })),
-      ] });
-      runtime.getModelRuntime = async () => ({
-        getApiKey: async () => "test-only",
-        getModel: (provider: string, id: string) => ({ provider, id, input: ["text"] }),
-        hasConfiguredAuth: () => true,
-      });
-      assert.equal((await runtime.routeModel("test", "continue", false)).id, SOL_MODEL.id);
-      assert.equal(body.state.recent_history.includes("CURRENT_TASK_CONTEXT"), true);
-      assert.equal(body.state.recent_history.includes("verbose tool output"), false);
-    } finally {
-      globalThis.fetch = previousFetch;
+    runtime.getSession = async () => ({ sessionId: "budget-session", messages: [] });
+    runtime.getModelRuntime = async () => ({
+      getModel: (provider: string, id: string) => ({ provider, id, input: ["text", "image"] }),
+      hasConfiguredAuth: () => true,
+    });
+    for (const prompt of ["hello", "ordinary task", "difficult architecture task"]) {
+      assert.equal((await runtime.routeModel("test", prompt, false, prompt)).id, LUNA_MODEL.id);
     }
   });
 });
 
-test("image preflight and routing retain vision-capable manual models", async () => {
+test("image preflight and routing use Luna and ignore retired manual models", async () => {
   await withRuntime(async (runtime) => {
-    runtime.state.models.test = { ...ASTRA_MODEL, routingMode: "manual" };
+    runtime.state.models.test = { ...retiredAstraModel, routingMode: "manual" };
+    runtime.getSession = async () => ({ model: retiredAstraModel, messages: [] });
     runtime.getModelRuntime = async () => ({
       getModel: (provider: string, id: string) => ({ provider, id, input: id === FLASH_MODEL.id ? ["text"] : ["text", "image"] }),
       hasConfiguredAuth: () => true,
     });
-    assert.equal((await runtime.getSelectedModel("test", true)).id, ASTRA_MODEL.id);
-    assert.equal((await runtime.routeModel("test", "Explain the screenshot", true)).id, ASTRA_MODEL.id);
+    assert.equal((await runtime.getSelectedModel("test", true)).id, LUNA_MODEL.id);
+    assert.equal((await runtime.routeModel("test", "Explain the screenshot", true)).id, LUNA_MODEL.id);
     runtime.state.models.test = { ...FLASH_MODEL, routingMode: "manual" };
-    assert.equal((await runtime.getSelectedModel("test", true)).id, SOL_MODEL.id);
-    assert.equal((await runtime.routeModel("test", "Explain the screenshot", true)).id, SOL_MODEL.id);
+    assert.equal((await runtime.getSelectedModel("test", true)).id, LUNA_MODEL.id);
+    assert.equal((await runtime.routeModel("test", "Explain the screenshot", true)).id, LUNA_MODEL.id);
   });
 });
 
@@ -190,18 +183,17 @@ test("manual selection has an explicit command to return to automatic routing", 
   assert.deepEqual(parseBotCommand("/model"), { name: "model" });
 });
 
-test("unavailable Jev preserves the active model rather than a legacy Flash default", async () => {
+test("retired selections fall back to the allowed Luna primary", async () => {
   await withRuntime(async (runtime) => {
-    const session = { model: { ...SOL_MODEL, input: ["text"] }, messages: [] };
-    runtime.state.models.test = { ...FLASH_MODEL };
+    const session = { model: { ...retiredSolModel, input: ["text"] }, messages: [] };
+    runtime.state.models.test = { ...retiredSolModel, routingMode: "manual" };
     runtime.sessions.set("test", Promise.resolve(session));
     runtime.getSession = async () => session;
     runtime.getModelRuntime = async () => ({
-      getApiKey: async () => undefined,
       getModel: (provider: string, id: string) => ({ provider, id, input: ["text"] }),
       hasConfiguredAuth: () => true,
     });
-    assert.equal((await runtime.routeModel("test", "continue", false)).id, SOL_MODEL.id);
+    assert.equal((await runtime.routeModel("test", "continue", false)).id, LUNA_MODEL.id);
   });
 });
 
@@ -209,7 +201,7 @@ test("the first image loads extension-provided vision models without refreshing 
   await withRuntime(async (runtime) => {
     let loaded = false;
     const flash = { ...FLASH_MODEL, input: ["text"] };
-    const sol = { ...SOL_MODEL, input: ["text", "image"] };
+    const sol = { ...LUNA_MODEL, input: ["text", "image"] };
     runtime.getModelRuntime = async () => ({
       getModel: (_provider: string, id: string) => id === FLASH_MODEL.id ? flash : loaded ? sol : undefined,
       getAvailable: async () => loaded ? [flash, sol] : [flash],
@@ -219,7 +211,7 @@ test("the first image loads extension-provided vision models without refreshing 
     runtime.ensureSessionFresh = async () => { throw new Error("Image preflight must not refresh a live session"); };
     const selected = await runtime.getSelectedModel("test", true);
     assert.equal(loaded, true);
-    assert.equal(selected.id, SOL_MODEL.id);
+    assert.equal(selected.id, LUNA_MODEL.id);
     assert.equal(selected.supportsImage, true);
   });
 });
@@ -241,50 +233,36 @@ function installRoutingSession(runtime: any) {
   return session;
 }
 
-function completedAssistant(model = ASTRA_MODEL) {
+function completedAssistant(model = LUNA_MODEL) {
   return { role: "assistant", provider: model.provider, model: model.id, stopReason: "stop", content: [{ type: "text", text: "Done" }] };
 }
 
 test("a bare continuation keeps the actual successful fallback model without consulting Jev", async () => {
   await withRuntime(async (runtime) => {
     const session = installRoutingSession(runtime);
-    let decisions = 0;
-    runtime.jevClient = { decide: async () => {
-      decisions += 1;
-      return { model: ASTRA_MODEL, score: 3, confidence: 1, reason: "jev" };
-    } };
     runtime.runPromptWithTimeouts = async () => {
       session.model = { ...FLASH_MODEL, input: ["text"] };
       session.messages.push(completedAssistant(FLASH_MODEL));
     };
     await runtime.promptWithImages("test", "Analyze a difficult concurrency bug", [], async () => {});
     assert.equal((await runtime.routeModel("test", "继续")).id, FLASH_MODEL.id);
-    assert.equal(decisions, 1);
-    assert.equal((await runtime.routeModel("test", "codex review")).id, SOL_MODEL.id);
-    assert.equal(decisions, 1);
+    assert.equal((await runtime.routeModel("test", "codex review")).id, LUNA_MODEL.id);
   });
 });
 
-test("new requirements and enriched continuation prompts are evaluated by Jev", async () => {
+test("new requirements and enriched continuation prompts use the budget-capped primary", async () => {
   await withRuntime(async (runtime) => {
     const session = installRoutingSession(runtime);
-    runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: ASTRA_MODEL });
-    let decisions = 0;
-    runtime.jevClient = { decide: async () => {
-      decisions += 1;
-      return { model: SOL_MODEL, score: 1, confidence: 1, reason: "jev" };
-    } };
-    assert.equal((await runtime.routeModel("test", "继续")).id, ASTRA_MODEL.id);
-    assert.equal(decisions, 0);
+    runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: LUNA_MODEL });
+    assert.equal((await runtime.routeModel("test", "继续")).id, LUNA_MODEL.id);
     for (const [prompt, currentRequest] of [
       ["继续，并检查并发锁", "继续，并检查并发锁"],
       [buildPromptWithQuote("继续", { msgType: "text", text: "A new task" }), "继续"],
       [buildPromptWithRecentMessages("继续", [{ sender: "someone", text: "Another task" }]), "继续"],
       ["继续\n\nATTACHED_FILE", "继续"],
     ]) {
-      assert.equal((await runtime.routeModel("test", prompt, false, currentRequest)).id, SOL_MODEL.id);
+      assert.equal((await runtime.routeModel("test", prompt, false, currentRequest)).id, LUNA_MODEL.id);
     }
-    assert.equal(decisions, 4);
   });
 });
 
@@ -293,15 +271,14 @@ test("failed, aborted, stopped, intercepted, and reset turns cannot reuse an old
     await withRuntime(async (runtime) => {
       const session = installRoutingSession(runtime);
       session.messages.push(completedAssistant());
-      runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: ASTRA_MODEL });
-      runtime.jevClient = { decide: async () => ({ model: SOL_MODEL, score: 2, confidence: 1, reason: "jev" }) };
+      runtime.continuationRouting.record("test", { sessionId: session.sessionId, workspace: runtime.cwd, model: LUNA_MODEL });
       runtime.runPromptWithTimeouts = async () => {
         if (mode === "error") throw new Error("Test provider failure");
         if (mode === "aborted") session.messages.push({ ...completedAssistant(), stopReason: "aborted" });
         if (mode === "stopped") runtime.activeRuns.get("test").stopped = true;
         if (mode === "reset") {
           runtime.resetMemory();
-          session.messages.push(completedAssistant(SOL_MODEL));
+          session.messages.push(completedAssistant(LUNA_MODEL));
         }
       };
       await runtime.promptWithImages("test", "Start a different task", [], async () => {});
@@ -312,18 +289,12 @@ test("failed, aborted, stopped, intercepted, and reset turns cannot reuse an old
   }
 });
 
-test("Jev cooldown retains the active model and fixed rules bypass the outage", async () => {
+test("the budget cap routes retired models to Luna and applies the fixed rules without Jev", async () => {
   await withRuntime(async (runtime) => {
     const session = installRoutingSession(runtime);
-    session.model = { ...ASTRA_MODEL, input: ["text"] };
-    let calls = 0;
-    runtime.jevClient = new JevDecisionClient({
-      now: () => 1000,
-      ask: async () => { calls += 1; throw new Error("Test upstream unavailable"); },
-    });
-    for (let i = 0; i < 4; i++) assert.equal((await runtime.routeModel("test", "A new task")).id, ASTRA_MODEL.id);
-    assert.equal(calls, 2);
-    assert.equal((await runtime.routeModel("test", "kdh task")).id, SOL_MODEL.id);
-    assert.equal(calls, 2);
+    session.model = { ...retiredAstraModel, input: ["text"] };
+    runtime.state.models.test = { ...retiredAstraModel, routingMode: "manual" };
+    for (let i = 0; i < 4; i++) assert.equal((await runtime.routeModel("test", "A new task")).id, LUNA_MODEL.id);
+    assert.equal((await runtime.routeModel("test", "kdh task")).id, LUNA_MODEL.id);
   });
 });

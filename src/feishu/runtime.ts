@@ -105,7 +105,7 @@ export interface ConversationRuntime {
 
   switchWorkspace(key: string, workspaceInput: string | undefined, onReply: (text: string) => Promise<void>): Promise<void>;
 
-  getAvailableModels(): Promise<RuntimeModel[]>;
+  getAvailableModels(key?: string): Promise<RuntimeModel[]>;
 
   getSelectedModel(key: string, hasImages?: boolean): Promise<RuntimeModel | undefined>;
 
