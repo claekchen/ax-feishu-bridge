@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askJevDifficulty, isManualSelection, isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, SOL_MODEL, TERRA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { askJevDifficulty, isManualSelection, isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, LUNA_MODEL, SOL_MODEL, TERRA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 import { PiConversationRuntime } from "../src/adapters/pi/PiConversationRuntime.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,9 +18,13 @@ test("priority routing recognizes KDH workspaces and Codex review requests", () 
 });
 
 test("Jev difficulty maps to four model tiers conservatively", () => {
-  assert.deepEqual(modelForDifficulty({ score: 0.1, confidence: 0.95 }), FLASH_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 0, confidence: 0.95 }), LUNA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 0.5, confidence: 0.6 }), { provider: "cliproxyapi", id: "gpt-6-luna" });
+  assert.deepEqual(modelForDifficulty({ score: 0.51, confidence: 0.95 }), TERRA_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), TERRA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1.5, confidence: 0.95 }), { provider: "cliproxyapi", id: "gpt-6-sol" });
   assert.deepEqual(modelForDifficulty({ score: 1.99, confidence: 0.99 }), SOL_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 2.5, confidence: 0.95 }), ASTRA_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 3, confidence: 1 }), ASTRA_MODEL);
   assert.equal(modelForDifficulty({ score: 3, confidence: 0.3 }), undefined);
   assert.equal(modelForDifficulty({ confidence: 1 }), undefined);
@@ -98,10 +102,13 @@ test("Jev rejects invalid scores and confidence instead of choosing an extreme t
 });
 
 test("explicit Flash selection is manual while legacy Flash defaults remain automatic", () => {
+  assert.deepEqual(FLASH_MODEL, { provider: "kaon", id: "aliyunus/deepseek-v4.1-flash" });
   assert.equal(isManualSelection(FLASH_MODEL), false);
   assert.equal(isManualSelection({ ...FLASH_MODEL, routingMode: "manual" }), true);
   assert.equal(isManualSelection(SOL_MODEL), true);
   assert.equal(isManualSelection({ ...SOL_MODEL, routingMode: "auto" }), false);
+  assert.equal(isManualSelection(LUNA_MODEL), true);
+  assert.equal(isManualSelection({ ...LUNA_MODEL, routingMode: "auto" }), false);
 });
 
 test("Jev keeps the current request and file content when quoted context is long", async () => {

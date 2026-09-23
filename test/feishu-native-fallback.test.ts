@@ -163,7 +163,7 @@ test("native fallback resumes after a completed tool without replaying the user 
   }, async ({ session, requests, fallbacks, events, toolExecutions, settings }) => {
     await session.prompt("Perform exactly one action and report the result.");
     assert.deepEqual(requests.map((request: Request) => request.model), [
-      "cliproxyapi/gpt-5.6-sol", "cliproxyapi/gpt-5.6-sol", "kaon/aliyunus/deepseek-v4.1-flash",
+      "cliproxyapi/gpt-6-sol", "cliproxyapi/gpt-6-sol", "kaon/aliyunus/deepseek-v4.1-flash",
     ]);
     assert.equal(toolExecutions(), 1);
     assert.equal(fallbacks.length, 1);
@@ -182,7 +182,7 @@ test("native fallback resumes after a completed tool without replaying the user 
 test("a failed Flash fallback is bounded to one attempt even for retryable errors", { timeout: 15000 }, async () => {
   await withSession(() => ({ stopReason: "error", errorMessage: "503 service unavailable" }), async ({ session, requests, fallbacks, events }) => {
     await session.prompt("Answer once.");
-    assert.deepEqual(requests.map((request: Request) => request.model), ["cliproxyapi/gpt-5.6-sol", "kaon/aliyunus/deepseek-v4.1-flash"]);
+    assert.deepEqual(requests.map((request: Request) => request.model), ["cliproxyapi/gpt-6-sol", "kaon/aliyunus/deepseek-v4.1-flash"]);
     assert.equal(fallbacks.length, 1);
     assert.equal(events.filter((event: any) => event.type === "auto_retry_start").length, 1);
     assert.equal(session.messages.at(-1).stopReason, "error");
