@@ -17,8 +17,15 @@ import type { ResumeScope, ResumeSessionPage } from "../../feishu/cards.ts";
 import type { ReplyCardSink } from "../../feishu/reply-card.ts";
 import { normalizeThinkingLevels, type ThinkingStatus } from "../../feishu/thinking.ts";
 import type { FeishuState } from "../../feishu/types.ts";
-import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts } from "../../feishu/runtime.ts";
+import type { ConversationRuntime, ConversationStatus, ContextUsage, RuntimeModel, StopConversationResult, ConversationTimeouts, FeishuMessageContext } from "../../feishu/runtime.ts";
+import type { FeishuTransport } from "../../feishu/transport.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
+import { createFlashFallbackExtension } from "./feishu-model-fallback.ts";
+import { createFeishuSessionSettings } from "./feishu-session-settings.ts";
+import { feishuRouterEnabled, FLASH_MODEL, isAllowedRoutingModel, isManualSelection, isPriorityRequest, LUNA_MODEL, modelMatches } from "./feishu-model-routing.ts";
+import { ContinuationRouting } from "./feishu-continuation-routing.ts";
+import { createFeishuContextExtension } from "./feishu-context-tools.ts";
+import { appendFeishuSystemPrompt } from "./feishu-system-prompt.ts";
 
 /**
  * Pi Runtime 适配器：
@@ -30,7 +37,12 @@ type ActiveRun = {
   session: AgentSession;
   runId?: string;
   stopped: boolean;
+  fallbackAttempted?: boolean;
+  startedAt: number;
+  toolCalls: number;
+  usage: Record<string, { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }>;
   status?: ReplyCardSink;
+  messageContext?: FeishuMessageContext;
   /** 当前轮流式回调（由 promptWithImages 设置） */
   onDelta?: (delta: string) => void;
 };
@@ -49,6 +61,8 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly sessionFileStats = new Map<string, { mtimeMs: number; size: number }>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly continuationRouting = new ContinuationRouting();
+  private routingGeneration = 0;
   private modelRuntimePromise: Promise<ModelRuntimeAdapter> | undefined;
   private defaultProvider: string | undefined;
   private defaultModelId: string | undefined;
@@ -56,15 +70,18 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly cwd: string;
   private readonly bridge?: FeishuBridgeRuntime;
   private readonly timeouts: ConversationTimeouts;
+  private readonly getTransport?: () => FeishuTransport | undefined;
 
   constructor(
     cwd: string,
     bridge?: FeishuBridgeRuntime,
     timeouts: ConversationTimeouts = {},
+    getTransport?: () => FeishuTransport | undefined,
   ) {
     this.cwd = cwd;
     this.bridge = bridge;
     this.timeouts = timeouts;
+    this.getTransport = getTransport;
     ensureRoot();
     this.state = readJson<FeishuState>(STATE_PATH, { sessions: {} });
     this.state.sessions ||= {};
@@ -97,18 +114,35 @@ export class PiConversationRuntime implements ConversationRuntime {
     onReply: (text: string) => Promise<void>,
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
+    preferredModel?: RuntimeModel,
+    currentRequest?: string,
+    messageContext?: FeishuMessageContext,
   ) {
     const previous = this.previousTurn(key);
+    let routingGeneration = this.routingGeneration;
     const next = previous.then(async () => {
       debugLog("feishu.prompt.start", { key, textLength: userText.length, imageCount: images.length });
+      routingGeneration = this.routingGeneration;
       const session = await this.ensureSessionFresh(key);
-      const run: ActiveRun = { session, runId: status?.runId, stopped: false, status, onDelta };
+      preferredModel ??= await this.routeModel(key, userText, images.length > 0, currentRequest ?? userText);
+      if (routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
+      if (preferredModel && !modelMatches(session.model, preferredModel)) {
+        const modelRuntime = await this.getModelRuntime();
+        const nextModel = modelRuntime.getModel(preferredModel.provider, preferredModel.id);
+        if (nextModel && modelRuntime.hasConfiguredAuth(nextModel)) await session.setModel(nextModel);
+      }
+      const run: ActiveRun = {
+        session, runId: status?.runId, stopped: false, status, onDelta,
+        messageContext: messageContext ? { ...messageContext } : undefined,
+        startedAt: Date.now(), toolCalls: 0, usage: {},
+      };
       this.activeRuns.set(key, run);
       this.bridge?.beginFeishuInput(session.sessionId);
       // 流式走 session 级订阅（createSession 里）→ run.onDelta，避免漏事件
       let unsub: (() => void) | undefined;
       let deltaCount = 0;
       let deltaChars = 0;
+      const previousAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (onDelta) {
         const userOnDelta = onDelta;
         run.onDelta = (delta: string) => {
@@ -120,6 +154,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       try {
         try {
           await this.runPromptWithTimeouts(session, userText, images, key, onReply, status);
+          if (!run.stopped && lastAssistantFailed(session)) throw new Error(lastAssistantError(session));
         } catch (error) {
           if (run.stopped) {
             debugLog("feishu.prompt.stopped", { key });
@@ -128,6 +163,7 @@ export class PiConversationRuntime implements ConversationRuntime {
           throw error;
         }
       } finally {
+        if (run.stopped && routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
         try { unsub?.(); } catch {}
         run.onDelta = undefined;
         if (this.activeRuns.get(key) === run) this.activeRuns.delete(key);
@@ -135,17 +171,35 @@ export class PiConversationRuntime implements ConversationRuntime {
         this.recordSessionFileStat(key, session.sessionFile);
       }
       if (run.stopped) return;
+      const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       const answer = extractLastAssistantText(session);
       debugLog("feishu.prompt.done", {
         key,
         answerLength: answer.length,
         deltaCount,
         deltaChars,
+        elapsedMs: Date.now() - run.startedAt,
+        model: session.model ? `${session.model.provider}/${session.model.id}` : undefined,
+        fallbackAttempted: run.fallbackAttempted === true,
+        toolCalls: run.toolCalls,
+        usage: run.usage,
       });
       await onReply(answer || "No response.");
       // onReply（ReplyCard.completeWithAnswer）已切到 done；此处仅兜底
       await status?.finish("done");
+      if (routingGeneration !== this.routingGeneration) return;
+      if (feishuRouterEnabled() && session.model && lastAssistant?.role === "assistant"
+        && lastAssistant !== previousAssistant && lastAssistant.stopReason === "stop") {
+        this.continuationRouting.record(key, {
+          sessionId: session.sessionId,
+          workspace: this.getWorkspace(key),
+          model: { provider: lastAssistant.provider, id: lastAssistant.model },
+        });
+      } else {
+        this.continuationRouting.clear(key);
+      }
     }).catch(async (error) => {
+      if (routingGeneration === this.routingGeneration) this.continuationRouting.clear(key);
       const message = error instanceof Error ? error.message : String(error);
       debugLog("feishu.prompt.error", { key, error: message });
       // 错误也写进同一张卡；onReply 若已是 completeWithAnswer 会 no-op（status 非 running）
@@ -172,7 +226,9 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   async getActualModel(key: string) {
-    const model = await this.getSelectedModel(key);
+    const cached = this.sessions.get(key);
+    const activeModel = cached ? (await cached).model : undefined;
+    const model = activeModel ? toRuntimeModel(activeModel) : await this.getSelectedModel(key);
     if (!model) return "默认模型";
     return `${model.provider}/${model.id}`;
   }
@@ -236,6 +292,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       delete this.state.sessions[key];
       writeJson(STATE_PATH, this.state);
@@ -296,6 +353,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       const currentPath = this.normalizeSessionPath(this.state.sessions[key]);
+      this.continuationRouting.clear(key);
       if (currentPath === sessionPath) {
         this.state.workspaces![key] = sessionInfo.cwd || this.getWorkspace(key);
         writeJson(STATE_PATH, this.state);
@@ -310,6 +368,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       this.state.sessions[key] = sessionPath;
       this.state.workspaces![key] = sessionInfo.cwd || this.cwd;
@@ -330,6 +389,10 @@ export class PiConversationRuntime implements ConversationRuntime {
   async selectModel(key: string, provider: string, modelId: string, onReply: (text: string) => Promise<void>) {
     const previous = this.previousTurn(key);
     const next = previous.then(async () => {
+      if (feishuRouterEnabled() && !isAllowedRoutingModel({ provider, id: modelId })) {
+        await onReply("当前只开放 GPT-6 Luna 和 DeepSeek 4.1 Flash。");
+        return;
+      }
       const modelRuntime = await this.getModelRuntime();
       const model = modelRuntime.getModel(provider, modelId);
       if (!model || !modelRuntime.hasConfiguredAuth(model)) {
@@ -338,7 +401,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       }
 
       const existing = this.state.models?.[key];
-      this.state.models![key] = { provider, id: modelId, thinkingLevel: existing?.thinkingLevel };
+      this.state.models![key] = { provider, id: modelId, thinkingLevel: existing?.thinkingLevel, routingMode: "manual" };
       writeJson(STATE_PATH, this.state);
 
       const cached = this.sessions.get(key);
@@ -346,8 +409,28 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
-      await onReply(`已切换到 ${provider}/${modelId}。当前飞书会话后续都会使用这个模型。`);
+      await onReply(feishuRouterEnabled()
+        ? `已切换到 ${provider}/${modelId}。当前飞书会话后续优先使用这个模型；KDH/Codex review 固定规则和图片能力要求仍生效。发送 /model auto 可恢复自动路由。`
+        : `已切换到 ${provider}/${modelId}。当前飞书会话后续都会使用这个模型。`);
+    }).catch(async (error) => {
+      await onReply(`Pi error: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    this.queues.set(key, next);
+    await next;
+  }
+
+  async enableAutoRouting(key: string, onReply: (text: string) => Promise<void>) {
+    if (!feishuRouterEnabled()) {
+      await onReply("当前机器人尚未启用自动模型路由。");
+      return;
+    }
+    const next = this.previousTurn(key).then(async () => {
+      this.continuationRouting.clear(key);
+      this.state.models![key] = { ...(this.state.models?.[key] || FLASH_MODEL), routingMode: "auto" };
+      writeJson(STATE_PATH, this.state);
+      await onReply("已恢复自动模型路由，下一条请求会根据任务难度选择模型。");
     }).catch(async (error) => {
       await onReply(`Pi error: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -416,6 +499,7 @@ export class PiConversationRuntime implements ConversationRuntime {
         try { (await cached).dispose(); } catch {}
       }
       this.sessions.delete(key);
+      this.continuationRouting.clear(key);
       this.sessionFileStats.delete(key);
       delete this.state.sessions[key];
       this.state.workspaces![key] = workspace;
@@ -428,11 +512,16 @@ export class PiConversationRuntime implements ConversationRuntime {
     await next;
   }
 
-  async getAvailableModels(): Promise<RuntimeModel[]> {
+  async getAvailableModels(key?: string): Promise<RuntimeModel[]> {
     const modelRuntime = await this.getModelRuntime();
-    const available = await modelRuntime.getAvailable();
+    let available = await modelRuntime.getAvailable();
+    if (feishuRouterEnabled() && key && !available.some((model) => model.provider === LUNA_MODEL.provider && model.id === LUNA_MODEL.id)) {
+      await this.getSession(key);
+      available = await modelRuntime.getAvailable();
+    }
     return [...available]
       .map(toRuntimeModel)
+      .filter((model) => !feishuRouterEnabled() || isAllowedRoutingModel(model))
       .sort((a, b) => {
         const providerCmp = a.provider.localeCompare(b.provider);
         if (providerCmp !== 0) return providerCmp;
@@ -440,22 +529,103 @@ export class PiConversationRuntime implements ConversationRuntime {
       });
   }
 
-  async getSelectedModel(key: string): Promise<RuntimeModel | undefined> {
+  async getSelectedModel(key: string, hasImages = false): Promise<RuntimeModel | undefined> {
+    if (feishuRouterEnabled()) {
+      const modelRuntime = await this.getModelRuntime();
+      const selected = this.state.models?.[key];
+      if (isManualSelection(selected)) {
+        const manual = modelRuntime.getModel(selected!.provider, selected!.id);
+        if (manual && modelRuntime.hasConfiguredAuth(manual) && (!hasImages || toRuntimeModel(manual).supportsImage)) {
+          return toRuntimeModel(manual);
+        }
+      }
+      let luna = modelRuntime.getModel(LUNA_MODEL.provider, LUNA_MODEL.id);
+      if (!luna && !this.sessions.has(key)) {
+        await this.getSession(key);
+        luna = modelRuntime.getModel(LUNA_MODEL.provider, LUNA_MODEL.id);
+      }
+      if (luna && modelRuntime.hasConfiguredAuth(luna) && (!hasImages || toRuntimeModel(luna).supportsImage)) {
+        return toRuntimeModel(luna);
+      }
+      if (!hasImages) {
+        const flash = modelRuntime.getModel(FLASH_MODEL.provider, FLASH_MODEL.id);
+        if (flash && modelRuntime.hasConfiguredAuth(flash)) return toRuntimeModel(flash);
+      }
+      return undefined;
+    }
     const native = await this.getSelectedNativeModel(key);
     return native ? toRuntimeModel(native) : undefined;
+  }
+
+  async routeModel(key: string, prompt: string, hasImages = false, currentRequest = prompt): Promise<RuntimeModel | undefined> {
+    if (!feishuRouterEnabled()) return this.getSelectedModel(key);
+    const started = Date.now();
+    const modelRuntime = await this.getModelRuntime();
+    const priority = isPriorityRequest(this.getWorkspace(key), currentRequest);
+    const selected = this.state.models?.[key];
+    let target: Pick<RuntimeModel, "provider" | "id"> | undefined;
+    let reason = "budget_cap";
+    if (priority) {
+      target = LUNA_MODEL;
+      reason = "priority";
+    } else if (isManualSelection(selected)) {
+      const manual = selected && modelRuntime.getModel(selected.provider, selected.id);
+      if (manual && modelRuntime.hasConfiguredAuth(manual) && (!hasImages || toRuntimeModel(manual).supportsImage)) {
+        target = selected;
+        reason = "manual";
+      } else if (hasImages) {
+        target = LUNA_MODEL;
+        reason = "image_capability";
+      }
+    } else if (hasImages) {
+      target = LUNA_MODEL;
+      reason = "image_capability";
+    } else {
+      const session = await this.getSession(key);
+      const continuation = prompt.trim() === currentRequest.trim()
+        ? this.continuationRouting.get(key, {
+          sessionId: session.sessionId, workspace: this.getWorkspace(key), currentRequest,
+        })
+        : undefined;
+      const retainedModel = continuation && modelRuntime.getModel(continuation.provider, continuation.id);
+      if (retainedModel && isAllowedRoutingModel(retainedModel) && modelRuntime.hasConfiguredAuth(retainedModel)) {
+        debugLog("feishu.router.selected", {
+          key, model: `${retainedModel.provider}/${retainedModel.id}`, priority,
+          reason: "continuation", latencyMs: Date.now() - started,
+        });
+        return toRuntimeModel(retainedModel);
+      }
+      target = LUNA_MODEL;
+    }
+    if (target) {
+      let model = modelRuntime.getModel(target.provider, target.id);
+      if (!model) {
+        await this.getSession(key);
+        model = modelRuntime.getModel(target.provider, target.id);
+      }
+      if (model && modelRuntime.hasConfiguredAuth(model) && (!hasImages || toRuntimeModel(model).supportsImage)) {
+        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, latencyMs: Date.now() - started });
+        return toRuntimeModel(model);
+      }
+      reason = "target_unavailable";
+    }
+    const fallback = await this.getSelectedModel(key, hasImages);
+    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, latencyMs: Date.now() - started });
+    return fallback;
   }
 
   /** 内部使用的原生 Pi 模型（不跨出本适配器）。 */
   private async getSelectedNativeModel(key: string) {
     const modelRuntime = await this.getModelRuntime();
     const selected = this.state.models?.[key];
-    if (selected) {
+    if (selected && (!feishuRouterEnabled() || isAllowedRoutingModel(selected))) {
       const model = modelRuntime.getModel(selected.provider, selected.id);
       if (model && modelRuntime.hasConfiguredAuth(model)) return model;
     }
     const cached = this.sessions.get(key);
     if (cached) {
-      return (await cached).model;
+      const model = (await cached).model;
+      if (!feishuRouterEnabled() || isAllowedRoutingModel(model ? toRuntimeModel(model) : undefined)) return model;
     }
     // Check settings default model before falling back to first available
     if (this.defaultProvider && this.defaultModelId) {
@@ -475,12 +645,14 @@ export class PiConversationRuntime implements ConversationRuntime {
   }
 
   resetMemory() {
+    this.routingGeneration += 1;
     for (const session of this.sessions.values()) {
       void session.then((s) => s.dispose()).catch(() => undefined);
     }
     this.sessions.clear();
     this.sessionFileStats.clear();
     this.queues.clear();
+    this.continuationRouting.reset();
     this.state = { sessions: {}, models: {}, workspaces: {} };
   }
 
@@ -528,6 +700,7 @@ export class PiConversationRuntime implements ConversationRuntime {
             oldSession.dispose();
           } catch {}
           this.sessions.delete(key);
+          this.continuationRouting.clear(key);
           const refreshed = this.createSession(key);
           this.sessions.set(key, refreshed);
           return refreshed;
@@ -630,13 +803,32 @@ export class PiConversationRuntime implements ConversationRuntime {
       ? SessionManager.open(existingFile, undefined, workspaceCwd)
       : SessionManager.create(workspaceCwd);
 
+    const settingsManager = createFeishuSessionSettings(workspaceCwd, getAgentDir(), feishuRouterEnabled());
+
     const loader = new DefaultResourceLoader({
       cwd: workspaceCwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => {
-        const extra = "You are replying through Feishu/Lark. Keep answers concise and readable in chat. Do not use markdown tables.";
-        return base?.trim() ? `${base}\n\n${extra}` : extra;
-      },
+      settingsManager,
+      extensionFactories: [
+        ...(this.getTransport ? [createFeishuContextExtension({
+          getTransport: this.getTransport,
+          getScope: () => this.activeRuns.get(key)?.messageContext,
+        })] : []),
+        ...(feishuRouterEnabled() ? [createFlashFallbackExtension({
+          settings: settingsManager,
+          getRun: () => this.activeRuns.get(key),
+          onFallback: (from, error) => debugLog("feishu.router.retry", {
+            key, from, to: `${FLASH_MODEL.provider}/${FLASH_MODEL.id}`, error,
+          }),
+        })] : []),
+      ],
+      extensionsOverride: (base) => ({
+        ...base,
+        extensions: feishuRouterEnabled()
+          ? base.extensions.filter((extension) => !extension.path.endsWith("/model-failover.ts"))
+          : base.extensions,
+      }),
+      appendSystemPromptOverride: appendFeishuSystemPrompt,
     });
 
     const previousChildEnv = process.env[CHILD_SESSION_ENV];
@@ -654,6 +846,7 @@ export class PiConversationRuntime implements ConversationRuntime {
       ...modelRuntime.sessionOptions,
       model,
       sessionManager,
+      settingsManager,
       resourceLoader: loader,
     } as any);
 
@@ -662,6 +855,17 @@ export class PiConversationRuntime implements ConversationRuntime {
     // 会话级长期订阅：保证 text_delta 在 prompt 期间一定能收到
     session.subscribe((event: any) => {
       const run = this.activeRuns.get(key);
+      if (run && event.type === "tool_execution_start") run.toolCalls += 1;
+      if (run && event.type === "message_end" && event.message?.role === "assistant") {
+        const message = event.message;
+        const modelKey = `${message.provider}/${message.model}`;
+        const totals = run.usage[modelKey] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        totals.calls += 1;
+        for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+          const value = message.usage?.[field];
+          if (typeof value === "number" && Number.isFinite(value)) totals[field] += value;
+        }
+      }
       run?.status?.updateFromEvent(event);
       const delta = extractAssistantTextDelta(event);
       if (delta && run && !run.stopped) {
@@ -811,6 +1015,16 @@ function extractLastAssistantText(session: AgentSession): string {
     }
   }
   return "";
+}
+
+function lastAssistantFailed(session: AgentSession): boolean {
+  const message = [...(session.messages || [])].reverse().find((item: any) => item.role === "assistant") as any;
+  return message?.stopReason === "error";
+}
+
+function lastAssistantError(session: AgentSession): string {
+  const message = [...(session.messages || [])].reverse().find((item: any) => item.role === "assistant") as any;
+  return message?.errorMessage || "Model request failed";
 }
 
 /** 把 Pi 原生模型对象转换成平台无关的 RuntimeModel（禁止原生对象泄漏到飞书层）。 */

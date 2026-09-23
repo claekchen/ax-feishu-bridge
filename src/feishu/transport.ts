@@ -1,4 +1,4 @@
-import type { FeishuCardAction, FeishuConfig, FeishuMessage } from "./types.ts";
+import type { FeishuAttachment, FeishuCardAction, FeishuConfig, FeishuMessage } from "./types.ts";
 import { loadConfig } from "./config.ts";
 import { debugLog } from "./debug.ts";
 import {
@@ -11,6 +11,28 @@ import { extractTextFromMsgType } from "./interactive-card.ts";
 import { FeishuCardActionWebhook } from "./card-action-webhook.ts";
 
 const TEXT_CHUNK_MAX_BYTES = 120 * 1024;
+const HISTORY_MAX_PAGES = 3;
+const HISTORY_MAX_MESSAGES = 50;
+const HISTORY_MAX_CHARS = 12_000;
+const QUOTE_MAX_MESSAGES = 4;
+const QUOTE_MAX_ATTACHMENTS = 24;
+
+export type FeishuContextMessageMetadata = {
+  messageId: string;
+  msgType: string;
+  chatId?: string;
+  parentId?: string;
+  rootId?: string;
+  threadId?: string;
+  createTime?: number;
+};
+
+export type FeishuContextMessage = Partial<FeishuContextMessageMetadata> & {
+  sender: string;
+  text: string;
+  attachments?: FeishuAttachment[];
+  notice?: "unavailable" | "truncated";
+};
 
 export class BotUnavailableError extends Error {
   constructor(message: string) {
@@ -217,6 +239,7 @@ export class FeishuTransport {
       rootId: message.root_id,
       parentId: message.parent_id,
       threadId: message.thread_id,
+      createTime: messageTime(message.create_time),
       mentions: message.mentions,
     };
 
@@ -546,61 +569,109 @@ export class FeishuTransport {
 
   async getRecentGroupMessages(
     chatId: string,
-    sinceMs: number,
+    sinceMs: number | undefined,
     excludedMessageIds: string[],
     limit: number,
-  ): Promise<Array<{ sender: string; text: string }>> {
-    if (!chatId || limit <= 0) return [];
+    options: { threadId?: string; beforeMs?: number; includeOwnMessages?: boolean } = {},
+  ): Promise<FeishuContextMessage[]> {
+    if (!chatId || !Number.isFinite(limit) || limit <= 0) return [];
+    const maximum = Math.min(HISTORY_MAX_MESSAGES, Math.floor(limit));
+    const since = Number.isFinite(sinceMs) ? sinceMs : undefined;
+    const before = Number.isFinite(options.beforeMs) ? options.beforeMs : undefined;
+    const seen = new Set(excludedMessageIds);
+    const pageTokens = new Set<string>();
+    const messages: FeishuContextMessage[] = [];
+    let pageToken: string | undefined;
+    let truncated = false;
+    let failure = false;
+    let totalChars = 0;
     try {
-      const res = await this.apiCall<any>("feishu.list_recent_messages", () =>
-        this.sdkClient.im.v1.message.list({
-          params: {
-            container_id_type: "chat",
-            container_id: chatId,
-            start_time: String(Math.floor(sinceMs / 1000)),
-            sort_type: "ByCreateTimeDesc",
-            page_size: 50,
-            card_msg_content_type: "raw_card_content",
-          },
-        }),
-      );
-      const excluded = new Set(excludedMessageIds);
-      const items = Array.isArray(res?.data?.items) ? res.data.items : [];
-      return items
-        .filter((item: any) => {
-          const messageId = String(item?.message_id || "");
+      for (let page = 0; page < HISTORY_MAX_PAGES; page += 1) {
+        const res = await this.apiCall<any>("feishu.list_recent_messages", () =>
+          this.sdkClient.im.v1.message.list({
+            params: {
+              container_id_type: options.threadId ? "thread" : "chat",
+              container_id: options.threadId || chatId,
+              // The thread container does not support server-side time filters.
+              ...(!options.threadId && since !== undefined ? { start_time: String(Math.floor(since / 1000)) } : {}),
+              ...(!options.threadId && before !== undefined ? { end_time: String(Math.ceil(before / 1000)) } : {}),
+              sort_type: "ByCreateTimeDesc",
+              page_size: 50,
+              card_msg_content_type: "raw_card_content",
+              ...(pageToken ? { page_token: pageToken } : {}),
+            },
+          }),
+        );
+        assertMessageResponse(res);
+        const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+        let reachedSince = false;
+        for (const item of items) {
+          const metadata = messageMetadata(item);
+          const messageId = metadata.messageId;
           const senderId = String(item?.sender?.id || "");
-          return messageId
-            && !excluded.has(messageId)
-            && !this.botOutboundMessageIds.has(messageId)
-            && senderId !== this.config.appId;
-        })
-        .map((item: any) => {
-          const extracted = extractTextFromMsgType(
-            String(item?.msg_type || "unknown"),
-            String(item?.body?.content || ""),
-            this.botOpenId,
-          );
-          return {
-            sender: String(item?.sender?.sender_name || item?.sender?.id || "unknown"),
-            text: extracted.text.trim(),
-          };
-        })
-        .filter((item: any) => item.text)
-        .slice(0, limit)
-        .reverse()
-        .map(({ sender, text }: any) => ({ sender, text }));
+          if (!messageId || seen.has(messageId)) continue;
+          seen.add(messageId);
+          if (item.deleted || (metadata.chatId && metadata.chatId !== chatId)
+            || (options.threadId && metadata.threadId && metadata.threadId !== options.threadId)
+            || (!options.includeOwnMessages && (this.botOutboundMessageIds.has(messageId)
+              || senderId === this.config.appId || (this.botOpenId && senderId === this.botOpenId)))) continue;
+          if (metadata.createTime !== undefined) {
+            if (since !== undefined && metadata.createTime < since) { reachedSince = true; continue; }
+            if (before !== undefined && metadata.createTime >= before) continue;
+          } else if (options.threadId && (since !== undefined || before !== undefined)) {
+            // An undated thread reply cannot be proven to precede the current turn.
+            continue;
+          }
+          const extracted = extractTextFromMsgType(metadata.msgType, messageContent(item), this.botOpenId);
+          const rawText = readableContextText(metadata.msgType, messageContent(item), extracted.text, extracted.attachments);
+          if (!rawText) continue;
+          if (messages.length >= maximum || totalChars >= HISTORY_MAX_CHARS - 200) {
+            truncated = true;
+            break;
+          }
+          const remaining = Math.min(3000, HISTORY_MAX_CHARS - 200 - totalChars);
+          const text = boundContextText(rawText, remaining);
+          truncated ||= text.length < rawText.length;
+          totalChars += text.length;
+          messages.push({
+            ...metadata,
+            sender: String(item?.sender?.sender_name || senderId || "unknown"),
+            text,
+            ...(extracted.attachments.length ? {
+              attachments: extracted.attachments.slice(0, QUOTE_MAX_ATTACHMENTS).map((attachment) => ({ ...attachment, sourceMessageId: messageId })),
+            } : {}),
+          });
+        }
+        if (reachedSince || !res?.data?.has_more) break;
+        if (messages.length >= maximum || totalChars >= HISTORY_MAX_CHARS - 200 || page + 1 >= HISTORY_MAX_PAGES) {
+          truncated = true;
+          break;
+        }
+        const nextToken = res?.data?.page_token;
+        if (typeof nextToken !== "string" || !nextToken || pageTokens.has(nextToken)) {
+          truncated = true;
+          break;
+        }
+        pageTokens.add(nextToken);
+        pageToken = nextToken;
+      }
     } catch (error) {
+      failure = true;
       debugLog("feishu.list_recent_messages.error", {
         chatId,
+        threadId: options.threadId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return [];
     }
+    messages.reverse();
+    messages.sort((a, b) => a.createTime !== undefined && b.createTime !== undefined ? a.createTime - b.createTime : 0);
+    if (failure) messages.unshift({ sender: "Context retrieval", text: "[History unavailable or incomplete: the Feishu message API request failed.]", notice: "unavailable" });
+    else if (truncated) messages.unshift({ sender: "Context retrieval", text: "[History truncated: only bounded recent context is included.]", notice: "truncated" });
+    return messages;
   }
 
-  /** 拉取单条消息（用于展开 parent/root 引用卡片） */
-  async getMessage(messageId: string): Promise<{ messageId: string; msgType: string; content: string; chatId?: string } | undefined> {
+  /** Fetch raw message content and references without sending any messages. */
+  async getMessage(messageId: string): Promise<(FeishuContextMessageMetadata & { content: string }) | undefined> {
     if (!messageId) return undefined;
     try {
       const res = await this.apiCall<any>("feishu.get_message", () =>
@@ -609,17 +680,10 @@ export class FeishuTransport {
           params: { card_msg_content_type: "raw_card_content" },
         }),
       );
-      const item = res?.data?.items?.[0] || res?.data?.message || res?.data;
-      if (!item) return undefined;
-      const body = item.body || item;
-      const msgType = body.message_type || body.msg_type || item.message_type || item.msg_type || "unknown";
-      const content = typeof body.content === "string" ? body.content : JSON.stringify(body.content || {});
-      return {
-        messageId: body.message_id || item.message_id || messageId,
-        msgType,
-        content,
-        chatId: body.chat_id || item.chat_id,
-      };
+      assertMessageResponse(res);
+      const item = Array.isArray(res?.data?.items) ? res.data.items[0] : res?.data?.message || res?.data;
+      if (!item || item.deleted || (!item.body && item.content === undefined)) return undefined;
+      return { ...messageMetadata(item, messageId), content: messageContent(item) };
     } catch (error) {
       debugLog("feishu.get_message.error", {
         messageId,
@@ -629,19 +693,79 @@ export class FeishuTransport {
     }
   }
 
-  async getQuotedContext(msg: { parentId?: string; rootId?: string }, botOpenId?: string, maxChars = 8000) {
-    const targetId = msg.parentId || msg.rootId;
-    if (!targetId) return null;
-    const parent = await this.getMessage(targetId);
-    if (!parent) return null;
-    const extracted = extractTextFromMsgType(parent.msgType, parent.content, botOpenId);
-    let text = extracted.text.trim();
-    if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n…(truncated)`;
-    const attachments = extracted.attachments.map((attachment) => ({
-      ...attachment,
-      sourceMessageId: parent.messageId,
-    }));
-    return { msgType: parent.msgType, text, attachments };
+  async getQuotedContext(
+    msg: { parentId?: string; rootId?: string; chatId?: string; messageId?: string },
+    botOpenId?: string,
+    maxChars = 8000,
+  ) {
+    const queue = [msg.parentId, msg.rootId].filter((id): id is string => Boolean(id));
+    if (!queue.length) return null;
+    const visited = new Set<string>(msg.messageId ? [msg.messageId] : []);
+    const messages: FeishuContextMessageMetadata[] = [];
+    const blocks: Array<{ messageId: string; msgType: string; text: string }> = [];
+    const attachments: FeishuAttachment[] = [];
+    const attachmentKeys = new Set<string>();
+    const failures: string[] = [];
+    let expectedChat = msg.chatId;
+    let requests = 0;
+    let truncated = false;
+    while (queue.length && requests < QUOTE_MAX_MESSAGES) {
+      const targetId = queue.shift()!;
+      if (visited.has(targetId)) continue;
+      visited.add(targetId);
+      requests += 1;
+      const parent = await this.getMessage(targetId);
+      if (!parent) {
+        failures.push(`${targetId}: message unavailable`);
+        continue;
+      }
+      if (expectedChat && parent.chatId && parent.chatId !== expectedChat) {
+        failures.push(`${targetId}: reference belongs to a different chat`);
+        continue;
+      }
+      expectedChat ||= parent.chatId;
+      const { content, ...metadata } = parent;
+      messages.push(metadata);
+      const extracted = extractTextFromMsgType(parent.msgType, content, botOpenId);
+      const text = readableContextText(parent.msgType, content, extracted.text, []);
+      if (isCardReferenceOnly(parent.msgType, content)) failures.push(`${targetId}: card body unavailable`);
+      blocks.push({ messageId: parent.messageId, msgType: parent.msgType, text });
+      for (const attachment of extracted.attachments) {
+        const key = `${parent.messageId}:${attachment.kind}:${attachment.fileKey}`;
+        if (attachmentKeys.has(key)) continue;
+        attachmentKeys.add(key);
+        if (attachments.length >= QUOTE_MAX_ATTACHMENTS) { truncated = true; continue; }
+        attachments.push({ ...attachment, sourceMessageId: parent.messageId });
+      }
+      for (const reference of [parent.parentId, parent.rootId]) {
+        if (reference && !visited.has(reference) && !queue.includes(reference)) queue.push(reference);
+      }
+    }
+    truncated ||= queue.some((id) => !visited.has(id));
+    const maxText = Number.isFinite(maxChars) ? Math.max(0, Math.min(32_000, Math.floor(maxChars))) : 8000;
+    const warning = failures.length ? `[Quoted context incomplete: ${failures.join("; ")}]` : "";
+    // Share the text budget so a long immediate reply cannot hide the root card.
+    const labels = blocks.map((block) => `[Quoted message ${block.messageId} (${block.msgType})]`);
+    const overhead = warning.length + labels.reduce((sum, label) => sum + label.length + 3, 0) + 100;
+    const perMessage = Math.max(0, Math.floor((maxText - overhead) / Math.max(1, blocks.length)));
+    const readable = blocks.length === 1 ? blocks[0].text : blocks.map((block, index) => {
+      const original = block.text || "[Attachment only]";
+      const bounded = boundContextText(original, perMessage);
+      truncated ||= bounded.length < original.length;
+      return `${labels[index]}\n${bounded}`;
+    }).join("\n\n");
+    const rawText = [warning, readable, ...(truncated ? ["[Quoted context truncated: content or reference limit reached.]"] : [])].filter(Boolean).join("\n\n");
+    const text = boundContextText(rawText, maxText);
+    truncated ||= text.length < rawText.length;
+    return {
+      msgType: messages[0]?.msgType || "unknown",
+      text,
+      attachments,
+      messageIds: messages.map((message) => message.messageId),
+      messages,
+      truncated,
+      failures,
+    };
   }
 
   async downloadMessageResource(messageId: string, fileKey: string, type: "image" | "file"): Promise<{ bytes: Buffer; mimeType?: string }> {
@@ -676,6 +800,61 @@ export class FeishuTransport {
     debugLog("feishu.download.image.fallback_done", { messageId, imageKey, bytes: bytes.length });
     return { bytes, mimeType: "image/jpeg" };
   }
+}
+
+function messageTime(value: unknown): number | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  if (typeof value === "string" && !value.trim()) return undefined;
+  const time = Number(value);
+  return Number.isFinite(time) && time >= 0 ? time : undefined;
+}
+
+function messageMetadata(item: any, fallbackId = ""): FeishuContextMessageMetadata {
+  const body = item?.body || item || {};
+  return {
+    messageId: String(item?.message_id || body.message_id || fallbackId),
+    msgType: String(item?.msg_type || item?.message_type || body.msg_type || body.message_type || "unknown"),
+    chatId: item?.chat_id || body.chat_id,
+    parentId: item?.parent_id || body.parent_id,
+    rootId: item?.root_id || body.root_id,
+    threadId: item?.thread_id || body.thread_id,
+    createTime: messageTime(item?.create_time ?? body.create_time),
+  };
+}
+
+function messageContent(item: any): string {
+  const content = (item?.body || item)?.content;
+  return typeof content === "string" ? content : JSON.stringify(content || {});
+}
+
+function assertMessageResponse(response: any) {
+  if (response?.code !== undefined && response.code !== 0) {
+    throw new Error(`Feishu message API returned code ${response.code}`);
+  }
+  if (!response?.data) throw new Error("Feishu message API returned no data");
+}
+
+function boundContextText(text: string, maximum: number): string {
+  if (text.length <= maximum) return text;
+  const suffix = "\n…(truncated)";
+  return maximum <= suffix.length ? suffix.slice(0, maximum) : `${text.slice(0, maximum - suffix.length)}${suffix}`;
+}
+
+function isCardReferenceOnly(msgType: string, content: string): boolean {
+  if (msgType !== "interactive") return false;
+  try {
+    const parsed = JSON.parse(content);
+    const card = parsed?.data || parsed;
+    return Boolean(card?.card_id && !card?.json_card && !card?.elements && !card?.body && !card?.header);
+  } catch {
+    return false;
+  }
+}
+
+function readableContextText(msgType: string, content: string, text: string, attachments: FeishuAttachment[]): string {
+  if (isCardReferenceOnly(msgType, content)) return "[Card body unavailable: Feishu returned only a card reference.]";
+  if (text.trim()) return text.trim();
+  return attachments.map((attachment) => attachment.kind === "image" ? "[Image attachment]" : `[File attachment: ${attachment.fileName || attachment.fileKey}]`).join("\n");
 }
 
 function splitText(text: string, maxBytes: number) {

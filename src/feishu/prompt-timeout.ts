@@ -32,6 +32,8 @@ export async function waitForPrompt(prompt: Promise<unknown>, options: PromptWat
   let notifyTimer: NodeJS.Timeout | undefined;
   let hardTimer: NodeJS.Timeout | undefined;
   let hardReject: ((error: Error) => void) | undefined;
+  let shutdown: Promise<void> | undefined;
+  let timeoutError: Error | undefined;
 
   if (notifyMs > 0) {
     notifyTimer = setTimeout(() => {
@@ -42,9 +44,9 @@ export async function waitForPrompt(prompt: Promise<unknown>, options: PromptWat
 
   if (hardMs > 0) {
     hardTimer = setTimeout(() => {
-      const error = new Error(hardTimeoutMessage);
-      hardReject?.(error);
-      void Promise.resolve(onHardTimeout?.()).catch(() => undefined);
+      timeoutError = new Error(hardTimeoutMessage);
+      shutdown = Promise.resolve().then(onHardTimeout).then(() => undefined).catch(() => undefined);
+      void shutdown.then(() => hardReject?.(timeoutError!));
     }, hardMs);
     hardTimer.unref?.();
   }
@@ -61,7 +63,10 @@ export async function waitForPrompt(prompt: Promise<unknown>, options: PromptWat
       await prompt;
     }
   } finally {
+    // Abort may settle the prompt before cleanup finishes; keep the queue blocked.
+    if (shutdown) await shutdown;
     if (notifyTimer) clearTimeout(notifyTimer);
     if (hardTimer) clearTimeout(hardTimer);
   }
+  if (timeoutError) throw timeoutError;
 }

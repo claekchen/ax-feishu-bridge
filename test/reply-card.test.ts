@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { ReplyCard } from "../src/feishu/reply-card.ts";
 import {
   buildCardKitCardJson,
   buildReplyCard,
@@ -96,4 +97,41 @@ test("regression: streaming running card without key must not silently drop stop
   const withoutKey = buildCardKitCardJson({ status: "running", streaming: true });
   assert.equal(hasStopControl(withKey), true);
   assert.equal(hasStopControl(withoutKey), false);
+});
+
+test("a shorter recovered answer replaces failed-model previews in the static card", async () => {
+  const updates: Array<{ messageId: string; card: any }> = [];
+  const card = new ReplyCard("p2p:user", "incoming-1", {
+    replyCard: async () => "outgoing-1",
+    updateCard: async (messageId, updated) => { updates.push({ messageId, card: updated }); },
+  }, { enabled: false });
+  await card.start();
+  card.append("A long unfinished answer from the model that failed. ");
+  card.append("Recovered.");
+  await card.completeWithAnswer("Recovered.");
+
+  assert.equal(card.bodyText, "Recovered.");
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].messageId, "outgoing-1");
+  assert.equal(updates[0].card.elements[0].text.content, "Recovered.");
+  assert.equal(headerTitle(updates[0].card), "回复");
+  assert.equal(hasStopControl(updates[0].card), false);
+});
+
+test("stopping preserves the partial reply despite a late completion callback", async () => {
+  const updates: any[] = [];
+  const card = new ReplyCard("p2p:user", "incoming-1", {
+    replyCard: async () => "outgoing-1",
+    updateCard: async (_messageId, updated) => { updates.push(updated); },
+  }, { enabled: false });
+  await card.start();
+  card.append("Partial answer");
+  await card.stopImmediately();
+  await card.completeWithAnswer("Late answer");
+
+  assert.equal(card.bodyText, "Partial answer");
+  assert.equal(updates.length, 1);
+  assert.equal(headerTitle(updates[0]), "已停止");
+  assert.match(JSON.stringify(updates[0]), /Partial answer/);
+  assert.doesNotMatch(JSON.stringify(updates[0]), /Late answer/);
 });

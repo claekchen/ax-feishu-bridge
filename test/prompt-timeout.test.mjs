@@ -106,6 +106,31 @@ test("hard timeout is cancelled when the prompt resolves first", async () => {
   assert.equal(hardCalls, 0);
 });
 
+test("hard timeout holds the queue until abort cleanup finishes", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  const prompt = deferred();
+  const cleanup = deferred();
+  let settled = false;
+  const run = waitForPrompt(prompt.promise, {
+    notifyMs: 0,
+    hardMs: 2000,
+    hardTimeoutMessage: "hard timeout",
+    onHardTimeout: async () => {
+      prompt.resolve();
+      await cleanup.promise;
+    },
+  });
+  const check = assert.rejects(run, /hard timeout/).then(() => { settled = true; });
+  mock.timers.tick(2000);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(settled, false);
+  cleanup.resolve();
+  await check;
+});
+
 test("a real prompt error propagates untouched", async () => {
   await assert.rejects(
     waitForPrompt(Promise.reject(new Error("real-model-error")), {
