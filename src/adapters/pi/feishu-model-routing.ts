@@ -7,7 +7,6 @@ import type { ModelSelection } from "../../feishu/types.ts";
 export const FLASH_MODEL = { provider: "kaon", id: "aliyunus/deepseek-v4.1-flash" };
 export const LUNA_MODEL = { provider: "cliproxyapi", id: "gpt-6-luna" };
 export const SOL_MODEL = { provider: "cliproxyapi", id: "gpt-6-sol" };
-export const TERRA_MODEL = { provider: "cliproxyapi", id: "gpt-5.6-terra" };
 export const ASTRA_MODEL = { provider: "cliproxyapi", id: "gpt-6-astra" };
 const JEV_URL = "https://kaon-router.kaonai.com/api/alpha/decisions";
 const JEV_MODEL = "openrouter/~typesafe/jev-latest";
@@ -36,7 +35,7 @@ export function isPriorityRequest(workspace: string, prompt: string) {
     || /(?:codex[\s_-]*review|review[\s_-]*codex|代码审查|代码评审|审查\s*(?:pr|pull request)|review\s*(?:pr|pull request)|(?:pr|pull request)\s*review)/i.test(prompt);
 }
 
-export function modelForDifficulty(answer: unknown): typeof LUNA_MODEL | typeof TERRA_MODEL | typeof SOL_MODEL | typeof ASTRA_MODEL | undefined {
+export function modelForDifficulty(answer: unknown): typeof LUNA_MODEL | typeof SOL_MODEL | typeof ASTRA_MODEL | undefined {
   if (!answer || typeof answer !== "object") return;
   const value = answer as { score?: unknown; confidence?: unknown };
   if (typeof value.score !== "number" || !Number.isFinite(value.score)
@@ -46,8 +45,7 @@ export function modelForDifficulty(answer: unknown): typeof LUNA_MODEL | typeof 
   const level = value.score;
   if (level <= 0.5) return LUNA_MODEL;
   if (level >= 2.5) return ASTRA_MODEL;
-  if (level >= 1.5) return SOL_MODEL;
-  return TERRA_MODEL;
+  return SOL_MODEL;
 }
 
 export async function askJevDifficulty(

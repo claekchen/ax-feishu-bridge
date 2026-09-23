@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askJevDifficulty, isManualSelection, isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, LUNA_MODEL, SOL_MODEL, TERRA_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
+import { askJevDifficulty, isManualSelection, isPriorityRequest, modelForDifficulty, ASTRA_MODEL, FLASH_MODEL, LUNA_MODEL, SOL_MODEL } from "../src/adapters/pi/feishu-model-routing.ts";
 import { PiConversationRuntime } from "../src/adapters/pi/PiConversationRuntime.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,8 +20,8 @@ test("priority routing recognizes KDH workspaces and Codex review requests", () 
 test("Jev difficulty maps to four model tiers conservatively", () => {
   assert.deepEqual(modelForDifficulty({ score: 0, confidence: 0.95 }), LUNA_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 0.5, confidence: 0.6 }), { provider: "cliproxyapi", id: "gpt-6-luna" });
-  assert.deepEqual(modelForDifficulty({ score: 0.51, confidence: 0.95 }), TERRA_MODEL);
-  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), TERRA_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 0.51, confidence: 0.95 }), SOL_MODEL);
+  assert.deepEqual(modelForDifficulty({ score: 1, confidence: 0.95 }), SOL_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 1.5, confidence: 0.95 }), { provider: "cliproxyapi", id: "gpt-6-sol" });
   assert.deepEqual(modelForDifficulty({ score: 1.99, confidence: 0.99 }), SOL_MODEL);
   assert.deepEqual(modelForDifficulty({ score: 2.5, confidence: 0.95 }), ASTRA_MODEL);
@@ -272,7 +272,7 @@ test("new requirements and enriched continuation prompts are evaluated by Jev", 
     let decisions = 0;
     runtime.jevClient = { decide: async () => {
       decisions += 1;
-      return { model: TERRA_MODEL, score: 1, confidence: 1, reason: "jev" };
+      return { model: SOL_MODEL, score: 1, confidence: 1, reason: "jev" };
     } };
     assert.equal((await runtime.routeModel("test", "继续")).id, ASTRA_MODEL.id);
     assert.equal(decisions, 0);
@@ -282,7 +282,7 @@ test("new requirements and enriched continuation prompts are evaluated by Jev", 
       [buildPromptWithRecentMessages("继续", [{ sender: "someone", text: "Another task" }]), "继续"],
       ["继续\n\nATTACHED_FILE", "继续"],
     ]) {
-      assert.equal((await runtime.routeModel("test", prompt, false, currentRequest)).id, TERRA_MODEL.id);
+      assert.equal((await runtime.routeModel("test", prompt, false, currentRequest)).id, SOL_MODEL.id);
     }
     assert.equal(decisions, 4);
   });
