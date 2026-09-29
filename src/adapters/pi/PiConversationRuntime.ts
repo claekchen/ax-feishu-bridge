@@ -22,7 +22,8 @@ import type { FeishuTransport } from "../../feishu/transport.ts";
 import { ensureWorkspaceExists, resolveWorkspacePath } from "../../feishu/workspace.ts";
 import { createFlashFallbackExtension } from "./feishu-model-fallback.ts";
 import { createFeishuSessionSettings } from "./feishu-session-settings.ts";
-import { feishuRouterEnabled, FLASH_MODEL, isAllowedRoutingModel, isManualSelection, isPriorityRequest, LUNA_MODEL, modelMatches } from "./feishu-model-routing.ts";
+import { ASTRA_MODEL, feishuRouterEnabled, FLASH_MODEL, isAllowedRoutingModel, isManualSelection, isPriorityRequest, LUNA_MODEL, modelMatches, SOL_MODEL } from "./feishu-model-routing.ts";
+import { JevDecisionClient } from "./feishu-jev-client.ts";
 import { ContinuationRouting } from "./feishu-continuation-routing.ts";
 import { createFeishuContextExtension } from "./feishu-context-tools.ts";
 import { appendFeishuSystemPrompt } from "./feishu-system-prompt.ts";
@@ -49,6 +50,7 @@ type ActiveRun = {
 
 type ModelRuntimeAdapter = {
   getModel(provider: string, id: string): any;
+  getApiKey?(provider: string): Promise<string | undefined>;
   hasConfiguredAuth(model: any): boolean;
   getAvailable(): Promise<any[]>;
   sessionOptions: Record<string, unknown>;
@@ -61,6 +63,7 @@ export class PiConversationRuntime implements ConversationRuntime {
   private readonly sessionFileStats = new Map<string, { mtimeMs: number; size: number }>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly jevClient = new JevDecisionClient();
   private readonly continuationRouting = new ContinuationRouting();
   private routingGeneration = 0;
   private modelRuntimePromise: Promise<ModelRuntimeAdapter> | undefined;
@@ -390,7 +393,7 @@ export class PiConversationRuntime implements ConversationRuntime {
     const previous = this.previousTurn(key);
     const next = previous.then(async () => {
       if (feishuRouterEnabled() && !isAllowedRoutingModel({ provider, id: modelId })) {
-        await onReply("当前只开放 GPT-6 Luna 和 DeepSeek 4.1 Flash。");
+        await onReply("当前只开放 GPT-6 Luna、GPT-6 Sol、GPT-6 Astra 和 DeepSeek 4.1 Flash。");
         return;
       }
       const modelRuntime = await this.getModelRuntime();
@@ -515,7 +518,9 @@ export class PiConversationRuntime implements ConversationRuntime {
   async getAvailableModels(key?: string): Promise<RuntimeModel[]> {
     const modelRuntime = await this.getModelRuntime();
     let available = await modelRuntime.getAvailable();
-    if (feishuRouterEnabled() && key && !available.some((model) => model.provider === LUNA_MODEL.provider && model.id === LUNA_MODEL.id)) {
+    const routedModels = [LUNA_MODEL, SOL_MODEL, ASTRA_MODEL, FLASH_MODEL];
+    if (feishuRouterEnabled() && key && routedModels.some((routed) =>
+      !available.some((model) => model.provider === routed.provider && model.id === routed.id))) {
       await this.getSession(key);
       available = await modelRuntime.getAvailable();
     }
@@ -539,18 +544,50 @@ export class PiConversationRuntime implements ConversationRuntime {
           return toRuntimeModel(manual);
         }
       }
+
+      const cached = this.sessions.get(key);
+      if (cached) {
+        const active = (await cached).model;
+        if (active && isAllowedRoutingModel(toRuntimeModel(active)) && modelRuntime.hasConfiguredAuth(active)
+          && (!hasImages || toRuntimeModel(active).supportsImage)) {
+          return toRuntimeModel(active);
+        }
+      }
+
+      if (hasImages) {
+        let sol = modelRuntime.getModel(SOL_MODEL.provider, SOL_MODEL.id);
+        if (!sol && !this.sessions.has(key)) {
+          await this.getSession(key);
+          sol = modelRuntime.getModel(SOL_MODEL.provider, SOL_MODEL.id);
+        }
+        if (sol && modelRuntime.hasConfiguredAuth(sol) && toRuntimeModel(sol).supportsImage) return toRuntimeModel(sol);
+        const visionModel = (await modelRuntime.getAvailable()).find((model: any) => {
+          const runtimeModel = toRuntimeModel(model);
+          return isAllowedRoutingModel(runtimeModel) && runtimeModel.supportsImage && modelRuntime.hasConfiguredAuth(model);
+        });
+        if (visionModel) return toRuntimeModel(visionModel);
+        if (!this.sessions.has(key)) {
+          const session = await this.getSession(key);
+          if (session.model && isAllowedRoutingModel(toRuntimeModel(session.model)) && toRuntimeModel(session.model).supportsImage) {
+            return toRuntimeModel(session.model);
+          }
+          const loadedVisionModel = (await modelRuntime.getAvailable()).find((model: any) => {
+            const runtimeModel = toRuntimeModel(model);
+            return isAllowedRoutingModel(runtimeModel) && runtimeModel.supportsImage && modelRuntime.hasConfiguredAuth(model);
+          });
+          if (loadedVisionModel) return toRuntimeModel(loadedVisionModel);
+        }
+        return undefined;
+      }
+
       let luna = modelRuntime.getModel(LUNA_MODEL.provider, LUNA_MODEL.id);
       if (!luna && !this.sessions.has(key)) {
         await this.getSession(key);
         luna = modelRuntime.getModel(LUNA_MODEL.provider, LUNA_MODEL.id);
       }
-      if (luna && modelRuntime.hasConfiguredAuth(luna) && (!hasImages || toRuntimeModel(luna).supportsImage)) {
-        return toRuntimeModel(luna);
-      }
-      if (!hasImages) {
-        const flash = modelRuntime.getModel(FLASH_MODEL.provider, FLASH_MODEL.id);
-        if (flash && modelRuntime.hasConfiguredAuth(flash)) return toRuntimeModel(flash);
-      }
+      if (luna && modelRuntime.hasConfiguredAuth(luna)) return toRuntimeModel(luna);
+      const flash = modelRuntime.getModel(FLASH_MODEL.provider, FLASH_MODEL.id);
+      if (flash && modelRuntime.hasConfiguredAuth(flash)) return toRuntimeModel(flash);
       return undefined;
     }
     const native = await this.getSelectedNativeModel(key);
@@ -564,9 +601,12 @@ export class PiConversationRuntime implements ConversationRuntime {
     const priority = isPriorityRequest(this.getWorkspace(key), currentRequest);
     const selected = this.state.models?.[key];
     let target: Pick<RuntimeModel, "provider" | "id"> | undefined;
-    let reason = "budget_cap";
+    let reason = "jev_unavailable";
+    let score: number | undefined;
+    let confidence: number | undefined;
+    let retryAfterMs: number | undefined;
     if (priority) {
-      target = LUNA_MODEL;
+      target = SOL_MODEL;
       reason = "priority";
     } else if (isManualSelection(selected)) {
       const manual = selected && modelRuntime.getModel(selected.provider, selected.id);
@@ -574,11 +614,11 @@ export class PiConversationRuntime implements ConversationRuntime {
         target = selected;
         reason = "manual";
       } else if (hasImages) {
-        target = LUNA_MODEL;
+        target = SOL_MODEL;
         reason = "image_capability";
       }
     } else if (hasImages) {
-      target = LUNA_MODEL;
+      target = SOL_MODEL;
       reason = "image_capability";
     } else {
       const session = await this.getSession(key);
@@ -595,7 +635,30 @@ export class PiConversationRuntime implements ConversationRuntime {
         });
         return toRuntimeModel(retainedModel);
       }
-      target = LUNA_MODEL;
+      try {
+        const history = (session.messages || []).filter((msg: any) => msg.role === "user" || msg.role === "assistant")
+          .slice(-8).map((msg: any) => {
+          const content = Array.isArray(msg.content)
+            ? msg.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ")
+            : typeof msg.content === "string" ? msg.content : "";
+          return `${msg.role}: ${content.slice(0, 1000)}`;
+        }).join("\n");
+        const apiKey = await modelRuntime.getApiKey?.("kaon");
+        if (apiKey) {
+          const decision = await this.jevClient.decide({ prompt, currentRequest, history, apiKey });
+          target = decision.model;
+          score = decision.score;
+          confidence = decision.confidence;
+          reason = decision.reason;
+          retryAfterMs = decision.retryAfterMs;
+          if (decision.error) debugLog("feishu.router.jev_error", { key, error: decision.error, retryAfterMs });
+        } else {
+          reason = "jev_missing_auth";
+        }
+      } catch (error) {
+        reason = "jev_error";
+        debugLog("feishu.router.jev_error", { key, error: error instanceof Error ? error.message : String(error) });
+      }
     }
     if (target) {
       let model = modelRuntime.getModel(target.provider, target.id);
@@ -604,13 +667,13 @@ export class PiConversationRuntime implements ConversationRuntime {
         model = modelRuntime.getModel(target.provider, target.id);
       }
       if (model && modelRuntime.hasConfiguredAuth(model) && (!hasImages || toRuntimeModel(model).supportsImage)) {
-        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, latencyMs: Date.now() - started });
+        debugLog("feishu.router.selected", { key, model: `${target.provider}/${target.id}`, priority, reason, score, confidence, retryAfterMs, latencyMs: Date.now() - started });
         return toRuntimeModel(model);
       }
       reason = "target_unavailable";
     }
     const fallback = await this.getSelectedModel(key, hasImages);
-    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, latencyMs: Date.now() - started });
+    debugLog("feishu.router.selected", { key, model: fallback ? `${fallback.provider}/${fallback.id}` : undefined, priority, reason, score, confidence, retryAfterMs, latencyMs: Date.now() - started });
     return fallback;
   }
 
@@ -947,6 +1010,7 @@ async function createModelRuntimeAdapter(): Promise<ModelRuntimeAdapter> {
     const runtime = await sdk.ModelRuntime.create();
     return {
       getModel: (provider, id) => runtime.getModel(provider, id),
+      getApiKey: async (provider) => (await runtime.getAuth(provider))?.auth?.apiKey,
       hasConfiguredAuth: (model) => runtime.hasConfiguredAuth(model.provider),
       getAvailable: async () => [...await runtime.getAvailable()],
       sessionOptions: { modelRuntime: runtime },
@@ -958,6 +1022,7 @@ async function createModelRuntimeAdapter(): Promise<ModelRuntimeAdapter> {
     const modelRegistry = sdk.ModelRegistry.create(authStorage);
     return {
       getModel: (provider, id) => modelRegistry.find(provider, id),
+      getApiKey: async (provider) => modelRegistry.getApiKeyForProvider(provider),
       hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
       getAvailable: async () => [...await modelRegistry.getAvailable()],
       sessionOptions: { authStorage, modelRegistry },
