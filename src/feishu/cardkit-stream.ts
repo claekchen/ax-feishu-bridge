@@ -172,10 +172,9 @@ export class CardKitStream {
   }
 
   ensureFinal(text: string): void {
-    if (!text) return;
-    if (!this.fullText.trim() || text.length >= this.fullText.length) {
-      this.fullText = text;
-    }
+    if (this.closed || !text) return;
+    // Final content is authoritative even when an earlier attempt streamed more text.
+    this.fullText = text;
   }
 
   private async tick() {
@@ -224,8 +223,8 @@ export class CardKitStream {
    */
   async close(finalText?: string, finalStatus: "done" | "stopped" | "failed" = "done"): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
     if (finalText) this.ensureFinal(finalText);
+    this.closed = true;
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;

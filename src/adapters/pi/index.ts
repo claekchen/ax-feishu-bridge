@@ -55,7 +55,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   const conversations = new PiConversationRuntime(process.cwd(), bridge, {
     promptNotifySec: initialConfig?.promptNotifySec,
     promptTimeoutSec: initialConfig?.promptTimeoutSec,
-  });
+  }, () => transport);
   const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore);
 
   const STATUS_KEY = "feishu-connection";

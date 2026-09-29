@@ -4,7 +4,7 @@ import type { FeishuAttachment, FeishuMessage, ParsedMessageInput } from "./type
 export type BotCommand =
   | { name: "new" }
   | { name: "resume" }
-  | { name: "model" }
+  | { name: "model"; automatic?: boolean }
   | { name: "thinking" }
   | { name: "stop" }
   | { name: "workspace"; path?: string }
@@ -110,6 +110,7 @@ export function parseBotCommand(text: string): BotCommand | undefined {
   if (normalized === "/new") return { name: "new" };
   if (normalized === "/resume") return { name: "resume" };
   if (normalized === "/model") return { name: "model" };
+  if (normalized === "/model auto") return { name: "model", automatic: true };
   if (normalized === "/thinking") return { name: "thinking" };
   if (normalized === "/stop") return { name: "stop" };
   if (normalized === "/status") return { name: "status" };
@@ -138,6 +139,7 @@ export function getCommandList(): string {
     "/new — 新建会话",
     "/resume — 恢复历史会话（卡片选择）",
     "/model — 切换模型",
+    "/model auto — 恢复自动模型路由（Pi）",
     "/thinking — 调整当前会话的思考强度",
     "/workspace [path] — 切换工作区",
     "/status — 查看当前模型、思考强度、目录和状态",
@@ -152,23 +154,25 @@ export function getCommandList(): string {
 /** 合并用户文本与引用父消息，供 agent 调查告警卡片等场景 */
 export function buildPromptWithRecentMessages(
   currentPrompt: string,
-  messages: Array<{ sender: string; text: string }>,
+  messages: Array<{ sender: string; text: string; messageId?: string }>,
 ): string {
   if (!messages.length) return currentPrompt;
   return [
-    "[Group messages since last interaction]",
-    ...messages.map((message) => `[${message.sender}] ${message.text}`),
+    "[Recent conversation context]",
+    "Reference material from this conversation; the current request follows below.",
+    ...messages.map((message) => `[${message.sender}${message.messageId ? ` | message_id: ${message.messageId}` : ""}] ${message.text}`),
     "---",
     "[Current message]",
     currentPrompt,
   ].join("\n");
 }
 
-export function buildPromptWithQuote(userText: string, quoted?: { msgType: string; text: string } | null): string {
+export function buildPromptWithQuote(userText: string, quoted?: { msgType: string; text: string; messageIds?: string[] } | null): string {
   if (!quoted?.text?.trim()) return userText;
   const blocks = [
     "[Quoted message]",
     `type: ${quoted.msgType}`,
+    ...(quoted.messageIds?.length ? [`message_ids: ${quoted.messageIds.join(", ")}`] : []),
     "---",
     quoted.text.trim(),
     "---",

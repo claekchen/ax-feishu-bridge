@@ -54,3 +54,56 @@ test("CardKit creates a reply-in-progress card before the first text delta", asy
     globalThis.fetch = originalFetch;
   }
 });
+
+test("CardKit closes with the shorter authoritative answer after a failed preview", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; payload: any }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ url, payload: JSON.parse(String(init?.body)) });
+    if (url.endsWith("/tenant_access_token/internal")) {
+      return new Response(JSON.stringify({ code: 0, tenant_access_token: "token", expire: 7200 }));
+    }
+    if (url.endsWith("/cardkit/v1/cards")) {
+      return new Response(JSON.stringify({ code: 0, data: { card_id: "card-recovery" } }));
+    }
+    if (url.endsWith("/messages/incoming-recovery/reply")) {
+      return new Response(JSON.stringify({ code: 0, data: { message_id: "outgoing-recovery" } }));
+    }
+    return new Response(JSON.stringify({ code: 0 }));
+  };
+
+  const fallbackReplies: string[] = [];
+  const stream = new CardKitStream(
+    "app-id", "app-secret", "feishu", "incoming-recovery",
+    async (text) => { fallbackReplies.push(text); },
+    { conversationKey: "p2p:user", runId: "run-recovery", pushIntervalMs: 60000 },
+  );
+  try {
+    await stream.startImmediately();
+    stream.append("A long unfinished answer from the model that failed. ");
+    await (stream as any).tick();
+    stream.append("Recovered.");
+    stream.ensureFinal("Recovered draft.");
+    await (stream as any).tick();
+    await stream.close("Recovered.");
+
+    const contentUpdates = calls.filter((call) => call.url.endsWith("/elements/content/content"));
+    assert.equal(contentUpdates[0].payload.content, "A long unfinished answer from the model that failed. ");
+    assert.equal(contentUpdates[1].payload.content, "Recovered draft.");
+    assert.equal(contentUpdates.at(-1)?.payload.content, "Recovered.");
+    const settings = calls.find((call) => call.url.endsWith("/card-recovery/settings"));
+    assert.deepEqual(JSON.parse(settings!.payload.settings).config, {
+      streaming_mode: false, summary: { content: "Recovered." },
+    });
+    const finalUpdate = calls.find((call) => call.url.endsWith("/cardkit/v1/cards/card-recovery"));
+    const finalCard = JSON.parse(finalUpdate!.payload.card.data);
+    assert.equal(finalCard.body.elements[0].content, "Recovered.");
+    assert.equal(finalCard.header.title.content, "回复");
+    assert.equal(finalCard.config.streaming_mode, false);
+    assert.deepEqual(fallbackReplies, []);
+  } finally {
+    await stream.close();
+    globalThis.fetch = originalFetch;
+  }
+});

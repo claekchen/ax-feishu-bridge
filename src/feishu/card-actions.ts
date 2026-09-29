@@ -95,7 +95,7 @@ export function createCardActionHandler(
     await conversations.selectModel(selected.key, selected.provider, selected.modelId, async (reply) => {
       await transport?.replyText(action.messageId, reply);
     });
-    const models = await conversations.getAvailableModels();
+    const models = await conversations.getAvailableModels(selected.key);
     const currentModel = await conversations.getSelectedModel(selected.key);
     return buildModelCard(selected.key, models, currentModel);
   };
