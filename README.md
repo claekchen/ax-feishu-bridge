@@ -271,6 +271,8 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `/feishu debug`     | 查看最近 20 条调试日志       |
 | `/feishu reset`     | 清除配置和映射，但保留会话历史     |
 
+同一 daemon 进程内，后台 `Agent` 子任务重新加载扩展时会复用已有飞书连接，不会重复启动桥接或退出主进程。更新 Pi 或 provider 后，等待任务空闲再重启 daemon；验收应包含真实工具调用和后台委派，不能只看回复文本。
+
 ***
 
 ## DSH 里怎么管理

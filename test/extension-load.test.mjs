@@ -81,6 +81,27 @@ function outputOf(result) {
   return [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
 }
 
+test("in-process subagents do not bootstrap or exit their owning Feishu daemon", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "feishu-owned-daemon-"));
+  try {
+    const result = spawnSync(process.execPath, [
+      "--experimental-strip-types", "--experimental-transform-types",
+      "--import", join(repoRoot, "test/register.mjs"),
+      join(repoRoot, "test/fixtures/owned-daemon-bootstrap.mjs"),
+    ], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: homeDir, PI_CODING_AGENT_DIR: join(homeDir, ".pi", "agent") },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(result.status, 0, outputOf(result));
+    assert.match(result.stdout, /owned-daemon-bootstrap-survived:0/, outputOf(result));
+    assert.doesNotMatch(result.stderr, /daemon found existing owner/);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test("loads with the current Pi SDK", () => {
   const result = runFeishuCommand("/feishu status");
   assert.equal(result.status, 0, outputOf(result) || `Pi exited via ${result.signal || "unknown signal"}`);
