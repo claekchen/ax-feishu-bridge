@@ -18,6 +18,8 @@ export type RuntimeModel = {
   supportsImage?: boolean;
 };
 
+export type FeishuMessageContext = { chatId: string; threadId?: string; messageId?: string; createTime?: number };
+
 /** 会话运行状态（/status 命令使用）。 */
 export type ConversationStatus = {
   cwd: string;
@@ -65,7 +67,12 @@ export interface ConversationRuntime {
     onReply: (text: string) => Promise<void>,
     status?: ReplyCardSink,
     onDelta?: (delta: string) => void,
+    preferredModel?: RuntimeModel,
+    currentRequest?: string,
+    messageContext?: FeishuMessageContext,
   ): Promise<void>;
+
+  routeModel?(key: string, prompt: string, hasImages: boolean, currentRequest?: string): Promise<RuntimeModel | undefined>;
 
   /** 供 /status 使用 */
   getStatus(key: string): ConversationStatus;
@@ -90,15 +97,17 @@ export interface ConversationRuntime {
 
   selectModel(key: string, provider: string, modelId: string, onReply: (text: string) => Promise<void>): Promise<void>;
 
+  enableAutoRouting?(key: string, onReply: (text: string) => Promise<void>): Promise<void>;
+
   selectThinkingLevel(key: string, level: string, onReply: (text: string) => Promise<void>): Promise<void>;
 
   getWorkspace(key: string): string;
 
   switchWorkspace(key: string, workspaceInput: string | undefined, onReply: (text: string) => Promise<void>): Promise<void>;
 
-  getAvailableModels(): Promise<RuntimeModel[]>;
+  getAvailableModels(key?: string): Promise<RuntimeModel[]>;
 
-  getSelectedModel(key: string): Promise<RuntimeModel | undefined>;
+  getSelectedModel(key: string, hasImages?: boolean): Promise<RuntimeModel | undefined>;
 
   resetMemory(): void;
 }

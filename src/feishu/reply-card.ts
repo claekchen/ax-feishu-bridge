@@ -182,8 +182,9 @@ export class ReplyCard implements ReplyCardSink {
   }
 
   ensureFinal(text: string) {
-    if (!text) return;
-    if (!this.body.trim() || text.length >= this.body.length) this.body = text;
+    if (this.status !== "running" || !text) return;
+    // A recovered answer can be shorter than the failed model's streamed preview.
+    this.body = text;
     this.cardkit?.ensureFinal(text);
   }
 

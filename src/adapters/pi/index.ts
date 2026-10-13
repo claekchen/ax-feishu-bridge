@@ -38,6 +38,12 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   if (process.env[CHILD_SESSION_ENV] === "1") {
     return;
   }
+  // In-process subagents inherit the daemon flag without our child-session marker.
+  // The gateway owner already manages this process; never bootstrap it twice.
+  if (process.env.PI_FEISHU_DAEMON === "1"
+    && readGatewayOwner(loadConfig()?.appId)?.pid === process.pid) {
+    return;
+  }
 
   // 模型可读写白名单配置（热更新 + 落盘）
   registerFeishuConfigTools(pi);
@@ -55,7 +61,7 @@ export default function createPiFeishuExtension(pi: ExtensionAPI, options?: { ex
   const conversations = new PiConversationRuntime(process.cwd(), bridge, {
     promptNotifySec: initialConfig?.promptNotifySec,
     promptTimeoutSec: initialConfig?.promptTimeoutSec,
-  });
+  }, () => transport);
   const messageHandler = new FeishuMessageHandler(conversations, () => transport, bridgeStore);
 
   const STATUS_KEY = "feishu-connection";

@@ -10,7 +10,8 @@ test("adds intervening group messages before the current prompt", () => {
   ]);
 
   assert.equal(prompt, [
-    "[Group messages since last interaction]",
+    "[Recent conversation context]",
+    "Reference material from this conversation; the current request follows below.",
     "[Alice] PR 已经通过 review",
     "[Bob] CI 也绿了",
     "---",
@@ -27,11 +28,11 @@ test("loads the newest intervening group messages in chronological order", async
     im: { v1: { message: { list: async (input: unknown) => {
       request = input;
       return { data: { items: [
-        { message_id: "om_current", create_time: "104", msg_type: "text", sender: { id: "ou_me", sender_name: "Me", sender_type: "user" }, body: { content: JSON.stringify({ text: "current" }) } },
-        { message_id: "om_3", create_time: "103", msg_type: "text", sender: { id: "ou_b", sender_name: "Bob", sender_type: "user" }, body: { content: JSON.stringify({ text: "third" }) } },
-        { message_id: "om_bot", create_time: "102", msg_type: "text", sender: { id: "cli_bot", sender_type: "app" }, body: { content: JSON.stringify({ text: "bot reply" }) } },
-        { message_id: "om_2", create_time: "101", msg_type: "text", sender: { id: "ou_a", sender_name: "Alice", sender_type: "user" }, body: { content: JSON.stringify({ text: "second" }) } },
-        { message_id: "om_previous", create_time: "100", msg_type: "text", sender: { id: "ou_me", sender_name: "Me", sender_type: "user" }, body: { content: JSON.stringify({ text: "previous trigger" }) } },
+        { message_id: "om_current", create_time: "104000", msg_type: "text", sender: { id: "ou_me", sender_name: "Me", sender_type: "user" }, body: { content: JSON.stringify({ text: "current" }) } },
+        { message_id: "om_3", create_time: "103000", msg_type: "text", sender: { id: "ou_b", sender_name: "Bob", sender_type: "user" }, body: { content: JSON.stringify({ text: "third" }) } },
+        { message_id: "om_bot", create_time: "102000", msg_type: "text", sender: { id: "cli_bot", sender_type: "app" }, body: { content: JSON.stringify({ text: "bot reply" }) } },
+        { message_id: "om_2", create_time: "101000", msg_type: "text", sender: { id: "ou_a", sender_name: "Alice", sender_type: "user" }, body: { content: JSON.stringify({ text: "second" }) } },
+        { message_id: "om_previous", create_time: "100000", msg_type: "text", sender: { id: "ou_me", sender_name: "Me", sender_type: "user" }, body: { content: JSON.stringify({ text: "previous trigger" }) } },
       ] } };
     } } } },
   };
@@ -53,7 +54,7 @@ test("loads the newest intervening group messages in chronological order", async
       card_msg_content_type: "raw_card_content",
     },
   });
-  assert.deepEqual(messages, [
+  assert.deepEqual(messages.map(({ sender, text }) => ({ sender, text })), [
     { sender: "Alice", text: "second" },
     { sender: "Bob", text: "third" },
   ]);

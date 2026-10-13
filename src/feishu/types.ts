@@ -63,6 +63,8 @@ export type FeishuConfig = {
 export type ModelSelection = {
   provider: string;
   id: string;
+  /** Distinguish an explicit selection from legacy automatic routing defaults. */
+  routingMode?: "manual" | "auto";
   /** 思考强度档位（可选，Harness 适配器持久化用；Pi 存在会话内部）。 */
   thinkingLevel?: string;
 };
@@ -79,7 +81,10 @@ export type FeishuRoute = {
   chatId: string;
   chatType: "p2p" | "group";
   threadMessageId?: string;
+  threadId?: string;
   lastMessageId: string;
+  lastContextMessageId?: string;
+  lastContextTime?: number;
   updatedAt: number;
 };
 
@@ -107,6 +112,7 @@ export type FeishuMessage = {
   rootId?: string;
   parentId?: string;
   threadId?: string;
+  createTime?: number;
   mentions?: unknown[];
 };
 

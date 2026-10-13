@@ -271,6 +271,8 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `/feishu debug`     | 查看最近 20 条调试日志       |
 | `/feishu reset`     | 清除配置和映射，但保留会话历史     |
 
+同一 daemon 进程内，后台 `Agent` 子任务重新加载扩展时会复用已有飞书连接，不会重复启动桥接或退出主进程。更新 Pi 或 provider 后，等待任务空闲再重启 daemon；验收应包含真实工具调用和后台委派，不能只看回复文本。
+
 ***
 
 ## DSH 里怎么管理
@@ -340,7 +342,7 @@ Windows PATH 加入 C:\Program Files\Git\bin
 | `promptNotifySec`     | 长任务超过多少秒后在飞书发一条“仍在处理中”提示，默认 `180`，`0` 关闭 |
 | `promptTimeoutSec`    | 任务硬超时秒数，超时后中止任务并报失败，默认 `0`（不设硬超时，长期运行也不会被报失败） |
 | `mentionRequesterOnComplete` | 群聊回复完成后单独 @ 提问者，默认 `false` |
-| `groupRecentMessageLimit` | 自动补齐两次机器人交互之间的群消息数，`0` 关闭，最大 `50` |
+| `groupRecentMessageLimit` | 自动补齐群／话题近期消息；首次交互也读取，`0` 关闭，最大 `50` |
 
 > 注意：长时间任务（例如跑测试、构建、批量处理）默认**不会**再被报为“任务失败”——到达 `promptNotifySec` 后只会在飞书里提示“任务仍在处理中”，回复卡片保持“回复中”，完成后正常送达结果。只有显式设置 `promptTimeoutSec` 后才会硬超时。修改后请执行 `/feishu restart` 生效。
 
